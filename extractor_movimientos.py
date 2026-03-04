@@ -1751,6 +1751,206 @@ def generar_sifere_txt(transacciones: list[dict], meta: dict) -> str:
     return "\n".join(lineas_txt)
 
 
+def generar_sifere_retenciones_txt(transacciones: list[dict], meta: dict) -> str:
+    """Genera un archivo TXT con formato SIFERE Formato Nº 1 para retenciones de IIBB.
+    Cada línea (79 chars): CodJurisdiccion(3) + CUIT(13) + Fecha(10) + Sucursal(4)
+    + NroConstancia(16) + TipoComp(1) + LetraComp(1) + NroCompOriginal(20) + Importe(11)
+    """
+    # ── Mapeo provincia → código de jurisdicción (reutiliza el de percepciones) ──
+    # Palabras clave de provincia extraídas de los nombres de retención
+    PROVINCIA_A_JURISDICCION = {
+        "CAP.FED": "901", "CABA": "901", "C.A.B.A": "901",
+        "BS.AS": "902", "BSAS": "902", "BS AS": "902", "BUENOS AIRES": "902",
+        "CATAMARCA": "903",
+        "CORDOBA": "904", "CÓRDOBA": "904",
+        "CORRIENTES": "905",
+        "CHACO": "906",
+        "CHUBUT": "907",
+        "ENTRE RIOS": "908", "ENTRE RÍOS": "908",
+        "FORMOSA": "909",
+        "JUJUY": "910",
+        "LA PAMPA": "911", "PAMPA": "911",
+        "LA RIOJA": "912", "RIOJA": "912",
+        "MENDOZA": "913",
+        "MISIONES": "914",
+        "NEUQUEN": "915", "NEUQUÉN": "915",
+        "RIO NEGRO": "916", "RÍO NEGRO": "916", "R.NEGRO": "916",
+        "SALTA": "917",
+        "SAN JUAN": "918",
+        "SAN LUIS": "919",
+        "STA CRUZ": "920", "SANTA CRUZ": "920",
+        "SANTA FE": "921",
+        "SGO ESTERO": "922", "SGO.ESTERO": "922", "SANTIAGO": "922",
+        "TIERRA D.FUEGO": "923", "TIERRA DEL FUEGO": "923",
+        "TUCUMAN": "924", "TUCUMÁN": "924",
+    }
+
+    # ── Mapeo tipo comprobante del sistema → tipo SIFERE retenciones (1 char) ──
+    TIPO_COMP_RET = {
+        "FC": "F", "TF": "F", "TK": "F",
+        "NC": "C",
+        "ND": "D",
+    }
+
+    # ── Palabras clave a EXCLUIR de retenciones ──
+    EXCLUIR = {"SIRCREB", "SIRTAC", "BCO", "GCIAS", "IVA", "I.V.A", "BANCO", "BANCAR"}
+
+    # ── Tasas IVA (para excluirlas) ──
+    IVA_RATES = {
+        'Tasa 21%', 'T.21%', 'C.F.21%', 'Tasa 27%', 'T.27%',
+        'Tasa 10.5%', 'Tasa 10,5%', 'T.10.5%', 'T.10,5%',
+        'C.F.10.5%', 'C.F.10,5%', 'Tasa 5%', 'T.5%',
+        'Tasa 2.5%', 'Tasa 2,5%', 'T.2.5%', 'T.2,5%',
+        'T.IMP 21%', 'T.IMP 10%', 'Exento',
+        'R.Monot21', 'R.Mont.10',
+    }
+
+    def _buscar_jurisdiccion(nombre_ret: str) -> str | None:
+        """Busca el código de jurisdicción extrayendo la provincia del nombre."""
+        nombre_upper = nombre_ret.upper()
+        for provincia, codigo in PROVINCIA_A_JURISDICCION.items():
+            if provincia in nombre_upper:
+                return codigo
+        return None
+
+    def _es_retencion_iibb(nombre: str) -> bool:
+        """Retorna True si el concepto es una retención IIBB (no bancaria/gcias/iva)."""
+        nombre_upper = nombre.upper()
+        if "RET" not in nombre_upper:
+            return False
+        for excl in EXCLUIR:
+            if excl in nombre_upper:
+                return False
+        return True
+
+    # ── Extraer periodo (mes/año) del meta ──
+    periodo_str = meta.get('periodo', '')
+    p_match = re.search(r'(\d{2})/(\d{4})', periodo_str)
+    if p_match:
+        mes_periodo = p_match.group(1)
+        anio_periodo = p_match.group(2)
+    else:
+        nums = re.findall(r'\d+', periodo_str)
+        if len(nums) >= 5:
+            mes_periodo = nums[1]
+            anio_periodo = nums[2]
+        else:
+            mes_periodo = "01"
+            anio_periodo = "2025"
+
+    # ── Procesar transacciones ──
+    lineas_txt = []
+
+    for t in transacciones:
+        dia = t['Fecha']
+        tipo = t['Tipo']
+        numero_raw = t['Numero']
+        cuit_raw = t['CUIT'] if t['CUIT'] else ''
+        letra = t.get('Letra', '')
+
+        # CUIT del agente (proveedor) con guiones, 13 chars
+        # Si ya tiene guiones, usar directo; si no, formatear XX-XXXXXXXX-X
+        if '-' in cuit_raw:
+            cuit_formateado = cuit_raw
+        else:
+            cuit_limpio = cuit_raw.replace('-', '')
+            if len(cuit_limpio) == 11:
+                cuit_formateado = f"{cuit_limpio[:2]}-{cuit_limpio[2:10]}-{cuit_limpio[10]}"
+            else:
+                cuit_formateado = cuit_limpio
+        # Asegurar 13 chars
+        cuit_formateado = cuit_formateado[:13].ljust(13)
+
+        # Separar PV y Nro del número de comprobante
+        if '-' in numero_raw:
+            pv_str = numero_raw.split('-')[0]
+            resto_num = numero_raw.split('-')[1]
+        else:
+            pv_str = numero_raw[:5]
+            resto_num = numero_raw[5:]
+
+        # Quitar letra del final si existe en el número
+        if resto_num and resto_num[-1].isalpha():
+            letra_comp = resto_num[-1]
+            nro_str = resto_num[:-1]
+        else:
+            letra_comp = letra if letra else 'A'
+            nro_str = resto_num
+
+        # Fecha dd/mm/yyyy
+        fecha_completa = f"{int(dia):02d}/{mes_periodo}/{anio_periodo}"
+
+        # Sucursal (PV, 4 dígitos, ceros a izquierda)
+        sucursal = pv_str[-4:].zfill(4)
+
+        # Nro. Constancia (16 dígitos, ceros a izquierda) = Nro comprobante
+        nro_constancia = nro_str.zfill(16)
+
+        # Tipo de comprobante SIFERE retención (1 char) — siempre "O" (Otros)
+        tipo_sifere = "O"
+
+        # Letra del comprobante (1 char) — espacio en blanco para retenciones
+        letra_sifere = " "
+
+        # Nro. Comprobante Original (20 chars, ceros a izquierda) = mismo nro repetido
+        nro_comp_original = nro_str.zfill(20)
+
+        # ── Recopilar retenciones IIBB de esta transacción ──
+        retenciones = {}  # nombre_retencion -> monto
+
+        # Desde la tasa principal
+        tasa = t['Tasa']
+        if tasa and tasa not in IVA_RATES and _es_retencion_iibb(tasa):
+            retenciones[tasa] = retenciones.get(tasa, 0.0) + t['Neto']
+
+        # Desde sub-conceptos
+        for s in t['SubConceptos']:
+            nombre = s['Concepto']
+            if not nombre or nombre in IVA_RATES:
+                continue
+            if _es_retencion_iibb(nombre):
+                monto = s['Neto'] if s['Neto'] != 0.0 else s['Percepcion']
+                retenciones[nombre] = retenciones.get(nombre, 0.0) + monto
+
+        # ── Generar líneas TXT para cada retención ──
+        for nombre_ret, monto in retenciones.items():
+            if monto == 0.0:
+                continue
+
+            codigo = _buscar_jurisdiccion(nombre_ret)
+            if codigo is None:
+                continue  # No se encontró jurisdicción
+
+            # Montos negativos solo para NC (tipo C o H)
+            monto_final = monto
+            es_nc = (tipo in ('NC',))
+
+            valor_abs = abs(monto_final)
+            parte_entera = int(valor_abs)
+            parte_decimal = f"{valor_abs:.2f}".split('.')[1]
+
+            if es_nc:
+                monto_formateado = f"-{parte_entera:07d},{parte_decimal}"
+            else:
+                monto_formateado = f"{parte_entera:08d},{parte_decimal}"
+
+            # Construir línea Formato 1 (79 chars)
+            linea = (
+                f"{codigo}"                # pos 1-3:   Jurisdicción (3)
+                f"{cuit_formateado}"        # pos 4-16:  CUIT agente (13)
+                f"{fecha_completa}"         # pos 17-26: Fecha (10)
+                f"{sucursal}"              # pos 27-30: Sucursal (4)
+                f"{nro_constancia}"        # pos 31-46: Nro Constancia (16)
+                f"{tipo_sifere}"           # pos 47:    Tipo Comprobante (1)
+                f"{letra_sifere}"          # pos 48:    Letra Comprobante (1)
+                f"{nro_comp_original}"     # pos 49-68: Nro Comp Original (20)
+                f"{monto_formateado}"      # pos 69-79: Importe (11)
+            )
+            lineas_txt.append(linea)
+
+    return "\n".join(lineas_txt)
+
+
 def seleccionar_archivo() -> Path:
     """Abre un diálogo para que el usuario seleccione un archivo .txt."""
     import tkinter as tk

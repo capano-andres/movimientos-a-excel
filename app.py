@@ -7,7 +7,7 @@ import PyPDF2
 from pathlib import Path
 from openpyxl.styles import Border, Side, Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
-from extractor_movimientos import parsear_archivo, crear_excel, generar_sifere_txt
+from extractor_movimientos import parsear_archivo, crear_excel, generar_sifere_txt, generar_sifere_retenciones_txt
 
 # --- Page Config ---
 st.set_page_config(
@@ -996,7 +996,16 @@ elif herramienta == TOOL_SIFERE:
     # ───────────────────────────────────────────────────────────────────────────────
     # HERRAMIENTA: Archivos SIFERE (TXT)
     # ───────────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="card"><div class="card-label">01 · Archivo fuente para SIFERE</div>', unsafe_allow_html=True)
+    st.markdown('<div class="card"><div class="card-label">01 · Tipo de archivo SIFERE</div>', unsafe_allow_html=True)
+    tipo_sifere = st.radio(
+        "¿Qué tipo de archivo SIFERE querés generar?",
+        options=["Percepciones", "Retenciones"],
+        horizontal=True,
+        key="sifere_tipo"
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="card"><div class="card-label">02 · Archivo fuente para SIFERE</div>', unsafe_allow_html=True)
     uploaded_sifere = st.file_uploader(
         "Arrastrá tu archivo de movimientos o hacé click para seleccionarlo",
         type=["txt", "prn"],
@@ -1009,19 +1018,22 @@ elif herramienta == TOOL_SIFERE:
         sifere_filename = Path(uploaded_sifere.name).stem
         st.success(f"**{uploaded_sifere.name}** listo para procesar")
 
-        st.markdown('<div class="card"><div class="card-label">02 · Generar TXT SIFERE</div>', unsafe_allow_html=True)
+        tipo_label = tipo_sifere.lower()  # "percepciones" o "retenciones"
+        st.markdown(f'<div class="card"><div class="card-label">03 · Generar TXT SIFERE ({tipo_sifere})</div>', unsafe_allow_html=True)
 
-        if st.button("⬡  Generar archivo SIFERE"):
+        if st.button(f"⬡  Generar archivo SIFERE ({tipo_sifere})"):
             try:
                 with st.spinner("Procesando..."):
                     raw_bytes = uploaded_sifere.getvalue()
-                    resultado = parsear_archivo(raw_bytes)
-                    movimientos = resultado["movimientos"]
-                    metadata = resultado["metadata"]
+                    content_str = raw_bytes.decode('latin-1', errors='replace')
+                    movimientos, metadata = parsear_archivo(content=content_str)
 
-                    txt_sifere = generar_sifere_txt(movimientos, metadata)
+                    if tipo_sifere == "Percepciones":
+                        txt_sifere = generar_sifere_txt(movimientos, metadata)
+                    else:
+                        txt_sifere = generar_sifere_retenciones_txt(movimientos, metadata)
 
-                st.success("✓  Archivo SIFERE generado con éxito")
+                st.success(f"✓  Archivo SIFERE ({tipo_sifere}) generado con éxito")
 
                 # Stats
                 st.markdown(f"""
@@ -1038,9 +1050,9 @@ elif herramienta == TOOL_SIFERE:
                 """, unsafe_allow_html=True)
 
                 st.download_button(
-                    label="↓  Descargar TXT SIFERE",
+                    label=f"↓  Descargar TXT SIFERE ({tipo_sifere})",
                     data=txt_sifere.encode("latin-1", errors="replace"),
-                    file_name=f"{sifere_filename}_sifere.txt",
+                    file_name=f"{sifere_filename}_sifere_{tipo_label}.txt",
                     mime="text/plain",
                     use_container_width=True,
                 )
