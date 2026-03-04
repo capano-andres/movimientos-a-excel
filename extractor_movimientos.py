@@ -1880,8 +1880,9 @@ def generar_sifere_retenciones_txt(transacciones: list[dict], meta: dict) -> str
         # Fecha dd/mm/yyyy
         fecha_completa = f"{int(dia):02d}/{mes_periodo}/{anio_periodo}"
 
-        # Sucursal (PV, 4 dígitos, ceros a izquierda)
-        sucursal = pv_str[-4:].zfill(4)
+        # Sucursal (PV, 4 dígitos, ceros a izquierda) — default 1 si no tiene
+        sucursal = pv_str.strip().lstrip('0') or "1"
+        sucursal = sucursal[-4:].zfill(4)
 
         # Nro. Constancia (16 dígitos, ceros a izquierda) = Nro comprobante
         nro_constancia = nro_str.zfill(16)
