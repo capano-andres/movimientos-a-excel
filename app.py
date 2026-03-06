@@ -532,6 +532,12 @@ if herramienta == TOOL_MOVIMIENTOS:
                                         break
                             df_arca = df_arca.rename(columns=rename_map)
 
+                            # Convertir fecha de aaaa-mm-dd a dd/mm/aaaa
+                            if 'Fecha' in df_arca.columns:
+                                df_arca['Fecha'] = df_arca['Fecha'].astype(str).apply(
+                                    lambda x: '/'.join(x.split('-')[::-1]) if '-' in x else x
+                                )
+
                             # Eliminar columnas no deseadas
                             DROP_KEYWORDS = [
                                 ['dito', 'fiscal', 'computable'],
@@ -702,10 +708,18 @@ elif herramienta == TOOL_PORTAL_IVA:
 
     if uploaded_zip_iva:
         st.success(f"**{uploaded_zip_iva.name}** listo para procesar")
-        st.markdown('<div class="card"><div class="card-label">02 · Procesar</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="card"><div class="card-label">02 · Datos del contribuyente</div>', unsafe_allow_html=True)
+        nombre_contribuyente = st.text_input("Nombre / Razón Social del contribuyente", value="", key="nombre_portal_iva")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="card"><div class="card-label">03 · Procesar</div>', unsafe_allow_html=True)
 
         if st.button("⬡  Procesar ZIP"):
-            try:
+            if not nombre_contribuyente.strip():
+                st.error("Ingresá el nombre del contribuyente para continuar.")
+            else:
+              try:
                 with st.spinner("Leyendo archivo ARCA..."):
                     with zipfile.ZipFile(io.BytesIO(uploaded_zip_iva.getvalue())) as zf:
                         all_files = [f for f in zf.namelist() if not f.endswith('/')]
@@ -817,6 +831,12 @@ elif herramienta == TOOL_PORTAL_IVA:
                                 break
                     df_iva = df_iva.rename(columns=rename_map)
 
+                    # Convertir fecha de aaaa-mm-dd a dd/mm/aaaa
+                    if 'Fecha' in df_iva.columns:
+                        df_iva['Fecha'] = df_iva['Fecha'].astype(str).apply(
+                            lambda x: '/'.join(x.split('-')[::-1]) if '-' in x else x
+                        )
+
                     # Eliminar columnas no deseadas
                     DROP_KW = [
                         ['dito', 'fiscal', 'computable'],
@@ -879,15 +899,20 @@ elif herramienta == TOOL_PORTAL_IVA:
                         money_fmt = '$#,##0.00'
 
                         ws.merge_cells(f'A1:{get_column_letter(n_cols)}1')
-                        ws['A1'] = f'IVA {tipo_portal} - ARCA'
+                        ws['A1'] = nombre_contribuyente.strip().upper()
                         ws['A1'].font = title_font; ws['A1'].fill = title_fill
                         ws['A1'].alignment = center_align
 
                         ws.merge_cells(f'A2:{get_column_letter(n_cols)}2')
-                        sub_parts = [p for p in [f'CUIT: {cuit_portal}' if cuit_portal else '', periodo_portal, f'{len(df_iva)} comprobantes'] if p]
+                        sub_parts = [p for p in [f'CUIT: {cuit_portal}' if cuit_portal else '', f'{len(df_iva)} comprobantes'] if p]
                         ws['A2'] = ' | '.join(sub_parts)
                         ws['A2'].font = Font(bold=True, size=11, color='2F5496')
                         ws['A2'].alignment = center_align
+
+                        ws.merge_cells(f'A5:{get_column_letter(n_cols)}5')
+                        ws['A5'] = f'{tipo_portal} {periodo_portal}'.strip()
+                        ws['A5'].font = Font(bold=True, size=12, color='2F5496')
+                        ws['A5'].alignment = center_align
 
                         col_list = list(df_iva.columns)
                         non_money_set = {'Fecha', 'Comprobante', 'PV', 'Nro.', 'CUIT', 'Razon Social', 'Auxiliar'}
@@ -964,16 +989,16 @@ elif herramienta == TOOL_PORTAL_IVA:
                 </div>
                 """, unsafe_allow_html=True)
 
-                zip_name = Path(uploaded_zip_iva.name).stem
+                excel_name = 'Compras' if tipo_portal == 'COMPRAS' else ('Ventas' if tipo_portal == 'VENTAS' else Path(uploaded_zip_iva.name).stem)
                 st.download_button(
                     label="↓  Descargar Excel",
                     data=output,
-                    file_name=f"{zip_name}_portal_iva.xlsx",
+                    file_name=f"{excel_name}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 )
 
-            except Exception as e:
+              except Exception as e:
                 st.error(f"Error al procesar: {str(e)}")
                 st.exception(e)
 
