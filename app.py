@@ -1609,10 +1609,18 @@ elif herramienta == TOOL_DEDUCCIONES:
 
     if uploaded_ded:
         st.success(f"**{uploaded_ded.name}** listo para procesar")
-        st.markdown('<div class="card"><div class="card-label">02 · Procesar</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="card"><div class="card-label">02 · Datos del contribuyente</div>', unsafe_allow_html=True)
+        nombre_ded = st.text_input("Nombre / Razón Social del contribuyente", value="", key="nombre_deducciones")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="card"><div class="card-label">03 · Procesar</div>', unsafe_allow_html=True)
 
         if st.button("⬡  Limpiar y Estilizar"):
-            try:
+            if not nombre_ded.strip():
+                st.error("Ingresá el nombre del contribuyente para continuar.")
+            else:
+              try:
                 with st.spinner("Procesando Excel de deducciones..."):
                     # Leer el archivo
                     df_ded = pd.read_excel(io.BytesIO(uploaded_ded.getvalue()))
@@ -1682,8 +1690,8 @@ elif herramienta == TOOL_DEDUCCIONES:
 
                     # ── Separar Retenciones y Percepciones ──
                     op_col = 'Operación'
-                    df_ret = df_ded[df_ded[op_col].str.upper().str.contains('RETENCION', na=False)] if op_col in df_ded.columns else pd.DataFrame()
-                    df_per = df_ded[df_ded[op_col].str.upper().str.contains('PERCEPCION', na=False)] if op_col in df_ded.columns else pd.DataFrame()
+                    df_ret = df_ded[df_ded[op_col].str.upper().str.contains('RETENCION', na=False)].copy() if op_col in df_ded.columns else pd.DataFrame()
+                    df_per = df_ded[df_ded[op_col].str.upper().str.contains('PERCEPCION', na=False)].copy() if op_col in df_ded.columns else pd.DataFrame()
                     # Si no hay columna Operación, todo va a una hoja genérica
                     if op_col not in df_ded.columns:
                         df_ret = df_ded
@@ -1717,16 +1725,16 @@ elif herramienta == TOOL_DEDUCCIONES:
 
                     def _style_ded_sheet(ws, df_sheet, sheet_title, n_r, n_c, col_list):
                         """Aplica estilos dorados a una hoja de deducciones."""
-                        # Fila 1: Título
+                        # Fila 1: Nombre contribuyente
                         ws.merge_cells(f'A1:{get_column_letter(n_c)}1')
-                        ws['A1'] = sheet_title
+                        ws['A1'] = nombre_ded.strip().upper()
                         ws['A1'].font = title_font
                         ws['A1'].fill = title_fill
                         ws['A1'].alignment = center_align
 
-                        # Fila 2: Subtítulo con tipo y cantidad
+                        # Fila 2: Título hoja + tipo y cantidad
                         ws.merge_cells(f'A2:{get_column_letter(n_c)}2')
-                        ws['A2'] = f'{tipo_deduccion} — {n_r} registros'
+                        ws['A2'] = f'{sheet_title} — {tipo_deduccion} — {n_r} registros'
                         ws['A2'].font = Font(italic=True, size=10, color='BF8F00')
                         ws['A2'].alignment = center_align
 
@@ -1818,7 +1826,7 @@ elif herramienta == TOOL_DEDUCCIONES:
                     use_container_width=True,
                 )
 
-            except Exception as e:
+              except Exception as e:
                 st.error(f"Error al procesar el archivo: {str(e)}")
                 st.exception(e)
 
