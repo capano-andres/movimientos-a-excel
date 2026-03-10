@@ -404,9 +404,10 @@ if herramienta in (TOOL_MOVIMIENTOS, TOOL_PORTAL_IVA):
 | 109 | TK C | 110 | TK | 112 | TK A |
 | 113 | TK B | 114 | TK C | 115 | TK A |
 | 116 | TK B | 117 | TK C | 119 | TK M |
-| 120 | TK M | | | | |
+| 120 | TK M | 4 | RC A → FC A | 9 | RC B → FC B |
+| 15 | RC C → FC C | | | | |
 
-**FC** = Factura · **NC** = Nota de Crédito · **ND** = Nota de Débito · **TF** = Tique Factura · **TK** = Tique
+**FC** = Factura · **NC** = Nota de Crédito · **ND** = Nota de Débito · **TF** = Tique Factura · **TK** = Tique · **RC** = Recibo (se trata como FC)
         """)
 
 if herramienta == TOOL_MOVIMIENTOS:
@@ -467,6 +468,8 @@ if herramienta == TOOL_MOVIMIENTOS:
                                 1: 'FC A', 6: 'FC B', 11: 'FC C', 51: 'FC M',
                                 19: 'FC', 22: 'FC', 195: 'FC T',
                                 201: 'FC A', 206: 'FC B', 211: 'FC C',
+                                # Recibos (se tratan como FC)
+                                4: 'FC A', 9: 'FC B', 15: 'FC C',
                                 # Notas de Débito
                                 2: 'ND A', 7: 'ND B', 12: 'ND C', 52: 'ND M',
                                 20: 'ND', 37: 'ND', 196: 'ND T',
@@ -758,6 +761,8 @@ elif herramienta == TOOL_PORTAL_IVA:
                         1: 'FC A', 6: 'FC B', 11: 'FC C', 51: 'FC M',
                         19: 'FC', 22: 'FC', 195: 'FC T',
                         201: 'FC A', 206: 'FC B', 211: 'FC C',
+                        # Recibos (se tratan como FC)
+                        4: 'FC A', 9: 'FC B', 15: 'FC C',
                         2: 'ND A', 7: 'ND B', 12: 'ND C', 52: 'ND M',
                         20: 'ND', 37: 'ND', 196: 'ND T',
                         45: 'ND A', 46: 'ND B', 47: 'ND C',
