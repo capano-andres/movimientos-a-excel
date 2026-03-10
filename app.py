@@ -1286,87 +1286,119 @@ elif herramienta == TOOL_LIQUIDACIONES:
                             center_align = Alignment(horizontal='center', vertical='center')
 
                             def formatear_hoja_liq(ws, df_hoja, columnas_ignorar, titulo_encabezado=None, nombre_entidad="", mostrar_resumen=True):
+                                # Ocultar líneas de cuadrícula
+                                ws.sheet_view.showGridLines = False
+
+                                # Insertar columna vacía al principio como separador visual
+                                ws.insert_cols(1)
+                                ws.column_dimensions['A'].width = 4  # Ancho para espaciado visual
+
+                                # Insertar fila vacía al principio como separador visual
+                                ws.insert_rows(1)
+
                                 n_cols = len(df_hoja.columns)
+                                # Offset +1 por la columna espaciadora
+                                col_offset = 1
+                                first_data_col = 1 + col_offset  # Columna B
+                                last_data_col = n_cols + col_offset  # Última columna de datos
 
                                 # Encabezado: filas de titulo
                                 if titulo_encabezado:
-                                    ws.insert_rows(1, 6)  # 5 filas de encabezado + 1 en blanco
-                                    last_col = get_column_letter(n_cols)
+                                    ws.insert_rows(2, 6)  # 5 filas de encabezado + 1 en blanco (después de fila vacía)
 
-                                    # Fila 1: LIQUIDACION DE TARJETA: (tarjeta)
-                                    ws.merge_cells(f'A1:{last_col}1')
-                                    ws['A1'] = f"LIQUIDACION DE TARJETA: {tipo_tarjeta_final.upper()}"
-                                    ws['A1'].font = Font(bold=True, size=14, color='FFFFFF')
-                                    ws['A1'].fill = header_fill
-                                    ws['A1'].alignment = center_align
+                                    # 4 columnas para el encabezado (B:E)
+                                    merge_end = get_column_letter(first_data_col + 3)  # 4 columnas desde B
 
-                                    # Fila 2: Contribuyente
-                                    ws.merge_cells(f'A2:{last_col}2')
-                                    ws['A2'] = nombre_contribuyente.upper()
-                                    ws['A2'].font = Font(bold=True, size=11, color='2E7D32')
-                                    ws['A2'].alignment = center_align
+                                    # Fila 2: LIQUIDACION DE TARJETA: (tarjeta)
+                                    ws.merge_cells(f'B2:{merge_end}2')
+                                    ws['B2'] = f"LIQUIDACION DE TARJETA: {tipo_tarjeta_final.upper()}"
+                                    ws['B2'].font = Font(bold=True, size=14, color='FFFFFF')
+                                    ws['B2'].fill = header_fill
+                                    ws['B2'].alignment = center_align
 
-                                    # Fila 3: Comprobante (AAMM-NroLiq/A)
-                                    ws.merge_cells(f'A3:{last_col}3')
-                                    ws['A3'] = titulo_encabezado
-                                    ws['A3'].font = Font(bold=True, size=11, color='2E7D32')
-                                    ws['A3'].alignment = center_align
+                                    # Fila 3: Contribuyente
+                                    ws.merge_cells(f'B3:{merge_end}3')
+                                    ws['B3'] = nombre_contribuyente.upper()
+                                    ws['B3'].font = Font(bold=True, size=11, color='2E7D32')
+                                    ws['B3'].alignment = center_align
 
-                                    # Fila 4: Entidad bancaria
-                                    ws.merge_cells(f'A4:{last_col}4')
+                                    # Fila 4: Comprobante (AAMM-NroLiq/A)
+                                    ws.merge_cells(f'B4:{merge_end}4')
+                                    ws['B4'] = titulo_encabezado
+                                    ws['B4'].font = Font(bold=True, size=11, color='2E7D32')
+                                    ws['B4'].alignment = center_align
+
+                                    # Fila 5: Entidad bancaria
+                                    ws.merge_cells(f'B5:{merge_end}5')
                                     entidad_display = nombre_entidad if nombre_entidad else banco
-                                    ws['A4'] = entidad_display
-                                    ws['A4'].font = Font(italic=True, size=10, color='388E3C')
-                                    ws['A4'].alignment = center_align
+                                    ws['B5'] = entidad_display
+                                    ws['B5'].font = Font(italic=True, size=10, color='388E3C')
+                                    ws['B5'].alignment = center_align
 
-                                    # Fila 5: Periodo
-                                    ws.merge_cells(f'A5:{last_col}5')
-                                    ws['A5'] = f"PERIODO: {periodo_liq.strip()}"
-                                    ws['A5'].font = Font(italic=True, size=10, color='388E3C')
-                                    ws['A5'].alignment = center_align
+                                    # Fila 6: Periodo
+                                    ws.merge_cells(f'B6:{merge_end}6')
+                                    ws['B6'] = f"PERIODO: {periodo_liq.strip()}"
+                                    ws['B6'].font = Font(italic=True, size=10, color='388E3C')
+                                    ws['B6'].alignment = center_align
 
-                                    # Fila 6: en blanco (separador)
-                                    data_header_row = 7
-                                    data_start_row = 8
+                                    # ─── Borde negro intenso externo en el encabezado (filas 2-6, cols B:merge_end) ───
+                                    thick_side = Side(border_style='thick', color='000000')
+                                    no_side = Side(border_style=None)
+                                    merge_end_idx = first_data_col + 3
+                                    for row_i in range(2, 7):
+                                        for col_i in range(first_data_col, merge_end_idx + 1):
+                                            cell = ws.cell(row=row_i, column=col_i)
+                                            t = thick_side if row_i == 2 else no_side
+                                            b = thick_side if row_i == 6 else no_side
+                                            l = thick_side if col_i == first_data_col else no_side
+                                            r = thick_side if col_i == merge_end_idx else no_side
+                                            cell.border = Border(top=t, bottom=b, left=l, right=r)
+
+                                    # Fila 7: en blanco (separador)
+                                    data_header_row = 8
+                                    data_start_row = 9
                                 else:
-                                    data_header_row = 1
-                                    data_start_row = 2
+                                    data_header_row = 2
+                                    data_start_row = 3
+
+                                # Ajustar columnas_ignorar con offset (B=col2, C=col3, etc.)
+                                columnas_ignorar_offset = [get_column_letter(ord(c) - ord('A') + 1 + col_offset) for c in columnas_ignorar]
 
                                 # Estilo de encabezados de columna
-                                for col_idx in range(1, n_cols + 1):
+                                for col_idx in range(first_data_col, last_data_col + 1):
                                     cell = ws.cell(row=data_header_row, column=col_idx)
                                     cell.font = header_font_white
                                     cell.fill = header_fill
                                     cell.alignment = center_align
                                     cell.border = border
 
-                                # Estilo de datos
+                                # Estilo de datos (sin bordes internos)
                                 last_data_row = data_start_row + len(df_hoja) - 1
                                 for row_idx in range(data_start_row, last_data_row + 1):
-                                    for col_idx in range(1, n_cols + 1):
+                                    for col_idx in range(first_data_col, last_data_col + 1):
                                         cell = ws.cell(row=row_idx, column=col_idx)
-                                        cell.border = border
                                         cell.alignment = center_align
-                                        if cell.column_letter not in columnas_ignorar:
+                                        if cell.column_letter not in columnas_ignorar_offset:
                                             if isinstance(cell.value, (int, float)):
                                                 cell.number_format = money_fmt
                                     # Zebra verde
                                     if (row_idx - data_start_row) % 2 == 0:
-                                        for col_idx in range(1, n_cols + 1):
+                                        for col_idx in range(first_data_col, last_data_col + 1):
                                             ws.cell(row=row_idx, column=col_idx).fill = zebra_fill
 
                                 # Fila TOTAL
                                 total_row = last_data_row + 1
-                                ws.merge_cells(f'A{total_row}:B{total_row}')
-                                ws[f'A{total_row}'] = "TOTAL"
-                                ws[f'A{total_row}'].font = Font(bold=True, size=11, color='FFFFFF')
-                                ws[f'A{total_row}'].fill = header_fill
-                                ws[f'A{total_row}'].alignment = center_align
-                                ws[f'A{total_row}'].border = border
-                                ws.cell(row=total_row, column=2).border = border
-                                ws.cell(row=total_row, column=2).fill = header_fill
+                                fc = first_data_col
+                                fc_letter = get_column_letter(fc)
+                                fc1_letter = get_column_letter(fc + 1)
+                                ws.merge_cells(f'{fc_letter}{total_row}:{fc1_letter}{total_row}')
+                                ws[f'{fc_letter}{total_row}'] = "TOTAL"
+                                ws[f'{fc_letter}{total_row}'].font = Font(bold=True, size=11, color='FFFFFF')
+                                ws[f'{fc_letter}{total_row}'].fill = header_fill
+                                ws[f'{fc_letter}{total_row}'].alignment = center_align
+                                ws.cell(row=total_row, column=fc + 1).fill = header_fill
 
-                                for col_idx in range(3, n_cols + 1):
+                                for col_idx in range(fc + 2, last_data_col + 1):
                                     cell = ws.cell(row=total_row, column=col_idx)
                                     col_letter = get_column_letter(col_idx)
                                     cell.value = f"=SUM({col_letter}{data_start_row}:{col_letter}{last_data_row})"
@@ -1374,10 +1406,25 @@ elif herramienta == TOOL_LIQUIDACIONES:
                                     cell.font = Font(bold=True, size=10, color='FFFFFF')
                                     cell.fill = header_fill
                                     cell.alignment = center_align
-                                    cell.border = border
 
-                                # Auto-ajustar columnas
-                                for col_idx in range(1, n_cols + 1):
+                                # ─── Borde negro intenso externo + verticales en header y total ───
+                                thick_side = Side(border_style='thick', color='000000')
+                                no_side = Side(border_style=None)
+                                for row_i in range(data_header_row, total_row + 1):
+                                    is_header = (row_i == data_header_row)
+                                    is_total = (row_i == total_row)
+                                    is_special_row = is_header or is_total
+                                    for col_i in range(first_data_col, last_data_col + 1):
+                                        cell = ws.cell(row=row_i, column=col_i)
+                                        t = thick_side if is_header else (thick_side if is_total else no_side)
+                                        b = thick_side if is_total else (thick_side if is_header else no_side)
+                                        # Verticales thick en header y total, solo extremos en datos
+                                        l = thick_side if (col_i == first_data_col or is_special_row) else no_side
+                                        r = thick_side if (col_i == last_data_col or is_special_row) else no_side
+                                        cell.border = Border(top=t, bottom=b, left=l, right=r)
+
+                                # Auto-ajustar columnas (solo las de datos)
+                                for col_idx in range(first_data_col, last_data_col + 1):
                                     col_letter = get_column_letter(col_idx)
                                     max_len = max(
                                         len(str(ws.cell(row=r, column=col_idx).value or ''))
@@ -1390,10 +1437,11 @@ elif herramienta == TOOL_LIQUIDACIONES:
                                 cargo_terminal_cols = []
                                 acreditaciones_cols = []
                                 for i, col in enumerate(cols_hoja):
+                                    real_col = i + 1 + col_offset  # +1 por offset de columna espaciadora
                                     if "CARGO TERMINAL" in col.upper():
-                                        cargo_terminal_cols.append((i + 1, get_column_letter(i + 1)))
+                                        cargo_terminal_cols.append((real_col, get_column_letter(real_col)))
                                     if "ACREDITACIONES PAGO QRD" in col.upper():
-                                        acreditaciones_cols.append((i + 1, get_column_letter(i + 1)))
+                                        acreditaciones_cols.append((real_col, get_column_letter(real_col)))
 
                                 yellow_fill = PatternFill('solid', fgColor='FFD600')
                                 for col_idx_ct, col_letter_ct in cargo_terminal_cols:
@@ -1422,7 +1470,7 @@ elif herramienta == TOOL_LIQUIDACIONES:
 
                                     for i, col in enumerate(cols_hoja):
                                         col_upper = col.upper()
-                                        col_letter = get_column_letter(i + 1)
+                                        col_letter = get_column_letter(i + 1 + col_offset)
                                         if "IVA" in col_upper and not col_upper.startswith("PER"):
                                             if "IVA RI" in col_upper or ("10,50" not in col and "10.50" not in col):
                                                 iva21_col_letters.append(col_letter)
@@ -1477,50 +1525,67 @@ elif herramienta == TOOL_LIQUIDACIONES:
 
                                     if resumen_items:
                                         resumen_start = total_row + 2
-                                        ws.merge_cells(f'A{resumen_start}:C{resumen_start}')
-                                        ws[f'A{resumen_start}'] = "RESUMEN IMPOSITIVO"
-                                        ws[f'A{resumen_start}'].font = Font(bold=True, size=11, color='FFFFFF')
-                                        ws[f'A{resumen_start}'].fill = header_fill
-                                        ws[f'A{resumen_start}'].alignment = center_align
-                                        ws[f'A{resumen_start}'].border = border
+                                        # Resumen con 3 columnas (B:D)
+                                        res_start_letter = get_column_letter(first_data_col)
+                                        res_end_letter = get_column_letter(first_data_col + 2)
+                                        ws.merge_cells(f'{res_start_letter}{resumen_start}:{res_end_letter}{resumen_start}')
+                                        ws[f'{res_start_letter}{resumen_start}'] = "RESUMEN IMPOSITIVO"
+                                        ws[f'{res_start_letter}{resumen_start}'].font = Font(bold=True, size=11, color='FFFFFF')
+                                        ws[f'{res_start_letter}{resumen_start}'].fill = header_fill
+                                        ws[f'{res_start_letter}{resumen_start}'].alignment = center_align
 
                                         for idx, (concepto, formula) in enumerate(resumen_items):
                                             r = resumen_start + 1 + idx
-                                            ws.merge_cells(f'A{r}:B{r}')
-                                            ws[f'A{r}'] = concepto
-                                            ws[f'A{r}'].font = Font(bold=True, size=10)
-                                            ws[f'A{r}'].alignment = center_align
-                                            ws[f'A{r}'].border = border
-                                            ws.cell(row=r, column=2).border = border
-                                            cell_val = ws.cell(row=r, column=3)
+                                            merge_a = get_column_letter(first_data_col)
+                                            merge_b = get_column_letter(first_data_col + 1)  # Concepto ocupa 2 cols (B:C)
+                                            val_col = first_data_col + 2  # Valor en col D
+                                            ws.merge_cells(f'{merge_a}{r}:{merge_b}{r}')
+                                            ws[f'{merge_a}{r}'] = concepto
+                                            ws[f'{merge_a}{r}'].font = Font(bold=True, size=10)
+                                            ws[f'{merge_a}{r}'].alignment = center_align
+                                            cell_val = ws.cell(row=r, column=val_col)
                                             cell_val.value = formula
                                             cell_val.number_format = money_fmt
                                             cell_val.alignment = center_align
-                                            cell_val.border = border
                                             if idx % 2 == 0:
-                                                ws[f'A{r}'].fill = zebra_fill
-                                                ws.cell(row=r, column=2).fill = zebra_fill
+                                                ws[f'{merge_a}{r}'].fill = zebra_fill
+                                                ws.cell(row=r, column=first_data_col + 1).fill = zebra_fill
                                                 cell_val.fill = zebra_fill
 
                                         # Fila TOTAL del resumen
                                         r_total = resumen_start + 1 + len(resumen_items)
                                         first_val_row = resumen_start + 1
                                         last_val_row = r_total - 1
-                                        ws.merge_cells(f'A{r_total}:B{r_total}')
-                                        ws[f'A{r_total}'] = "TOTAL"
-                                        ws[f'A{r_total}'].font = Font(bold=True, size=11, color='FFFFFF')
-                                        ws[f'A{r_total}'].fill = header_fill
-                                        ws[f'A{r_total}'].alignment = center_align
-                                        ws[f'A{r_total}'].border = border
-                                        ws.cell(row=r_total, column=2).fill = header_fill
-                                        ws.cell(row=r_total, column=2).border = border
-                                        cell_total = ws.cell(row=r_total, column=3)
-                                        cell_total.value = f"=SUM(C{first_val_row}:C{last_val_row})"
+                                        merge_a = get_column_letter(first_data_col)
+                                        merge_b = get_column_letter(first_data_col + 1)
+                                        val_col = first_data_col + 2
+                                        ws.merge_cells(f'{merge_a}{r_total}:{merge_b}{r_total}')
+                                        ws[f'{merge_a}{r_total}'] = "TOTAL"
+                                        ws[f'{merge_a}{r_total}'].font = Font(bold=True, size=11, color='FFFFFF')
+                                        ws[f'{merge_a}{r_total}'].fill = header_fill
+                                        ws[f'{merge_a}{r_total}'].alignment = center_align
+                                        ws.cell(row=r_total, column=first_data_col + 1).fill = header_fill
+                                        val_col_letter = get_column_letter(val_col)
+                                        cell_total = ws.cell(row=r_total, column=val_col)
+                                        cell_total.value = f"=SUM({val_col_letter}{first_val_row}:{val_col_letter}{last_val_row})"
                                         cell_total.number_format = money_fmt
                                         cell_total.font = Font(bold=True, size=10, color='FFFFFF')
                                         cell_total.fill = header_fill
                                         cell_total.alignment = center_align
-                                        cell_total.border = border
+
+                                        # ─── Borde negro intenso externo en resumen impositivo ───
+                                        thick_side = Side(border_style='thick', color='000000')
+                                        no_side = Side(border_style=None)
+                                        res_first_col = first_data_col
+                                        res_last_col = first_data_col + 2  # 3 columnas
+                                        for row_i in range(resumen_start, r_total + 1):
+                                            for col_i in range(res_first_col, res_last_col + 1):
+                                                cell = ws.cell(row=row_i, column=col_i)
+                                                t = thick_side if row_i == resumen_start else no_side
+                                                b = thick_side if row_i == r_total else no_side
+                                                l = thick_side if col_i == res_first_col else no_side
+                                                r_s = thick_side if col_i == res_last_col else no_side
+                                                cell.border = Border(top=t, bottom=b, left=l, right=r_s)
 
                             with pd.ExcelWriter(output, engine="openpyxl") as writer:
                                 df_movimientos.to_excel(writer, sheet_name="Liquidaciones", index=False)
