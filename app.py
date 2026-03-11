@@ -7,7 +7,7 @@ import PyPDF2
 from pathlib import Path
 from openpyxl.styles import Border, Side, Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
-from extractor_movimientos import parsear_archivo, crear_excel, generar_sifere_txt, generar_sifere_retenciones_txt
+from extractor_movimientos import parsear_archivo, crear_excel, generar_sifere_txt, generar_sifere_retenciones_txt, generar_percepciones_arba_txt
 
 # --- Page Config ---
 st.set_page_config(
@@ -375,10 +375,11 @@ TOOL_PORTAL_IVA = "Movimientos Portal IVA limpio (.zip)"
 TOOL_SIFERE = "Archivos SIFERE (.txt)"
 TOOL_LIQUIDACIONES = "Liquidaciones Tarjeta (.pdf)"
 TOOL_DEDUCCIONES = "Limpieza Excel Deducciones IVA/Ganancias"
+TOOL_ARBA = "Archivo Agente de Percepciones ARBA (.txt)"
 
 herramienta = st.selectbox(
     "Seleccioná la herramienta:",
-    options=[TOOL_MOVIMIENTOS, TOOL_PORTAL_IVA, TOOL_SIFERE, TOOL_LIQUIDACIONES, TOOL_DEDUCCIONES],
+    options=[TOOL_MOVIMIENTOS, TOOL_PORTAL_IVA, TOOL_SIFERE, TOOL_ARBA, TOOL_LIQUIDACIONES, TOOL_DEDUCCIONES],
     index=0,
 )
 
@@ -1913,5 +1914,109 @@ elif herramienta == TOOL_DEDUCCIONES:
             letter-spacing: 0.12em;
         ">
             ESPERANDO ARCHIVO EXCEL · PASO 01
+        </div>
+        """, unsafe_allow_html=True)
+
+
+elif herramienta == TOOL_ARBA:
+    # ───────────────────────────────────────────────────────────────────────────────
+    # HERRAMIENTA: Archivo Percepciones ARBA
+    # ───────────────────────────────────────────────────────────────────────────────
+    st.markdown('<div class="card"><div class="card-label">01 · Archivo fuente (Movimientos Ventas)</div>', unsafe_allow_html=True)
+    uploaded_arba = st.file_uploader(
+        "Arrastrá tu archivo de movimientos de ventas o hacé click para seleccionarlo",
+        type=["txt", "prn"],
+        label_visibility="visible",
+        key="arba_file"
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if uploaded_arba:
+        arba_filename = Path(uploaded_arba.name).stem
+        st.success(f"**{uploaded_arba.name}** listo para procesar")
+
+        # ─── Card 02: Periodo ──────────────────────────────────────────────────────
+        st.markdown('<div class="card"><div class="card-label">02 · Periodo</div>', unsafe_allow_html=True)
+        periodo_arba = st.text_input(
+            "Ingresá el periodo (MM/AAAA)",
+            value="",
+            placeholder="Ej: 03/2026",
+            key="arba_periodo"
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        # ─── Card 03: Procesar ─────────────────────────────────────────────────────
+        st.markdown('<div class="card"><div class="card-label">03 · Generar TXT Percepciones ARBA</div>', unsafe_allow_html=True)
+
+        if st.button("⬡  Generar archivo ARBA"):
+            # Validar periodo obligatorio
+            periodo_limpio = periodo_arba.strip()
+            periodo_match = re.match(r'^(\d{2})/(\d{4})$', periodo_limpio)
+            if not periodo_match:
+                st.error("El periodo es obligatorio y debe tener el formato **MM/AAAA** (ej: 03/2026)")
+            else:
+                mes_p = periodo_match.group(1)
+                anio_p = periodo_match.group(2)
+                try:
+                    with st.spinner("Procesando movimientos de ventas..."):
+                        raw_bytes = uploaded_arba.getvalue()
+                        content_str = raw_bytes.decode('latin-1', errors='replace')
+                        movimientos, metadata = parsear_archivo(content=content_str)
+
+                        # Inyectar periodo ingresado por el usuario
+                        metadata['periodo'] = f"Desde el 01/{mes_p}/{anio_p} hasta el 28/{mes_p}/{anio_p}"
+
+                        txt_arba = generar_percepciones_arba_txt(movimientos, metadata)
+
+                    if not txt_arba.strip():
+                        st.warning("No se encontraron percepciones IIBB Buenos Aires en los movimientos.")
+                    else:
+                        st.success("✓  Archivo Percepciones ARBA generado con éxito")
+
+                        # Stats
+                        n_lineas = len(txt_arba.splitlines())
+                        st.markdown(f"""
+                        <div class="stats-row">
+                            <div class="stat-chip">
+                                <span class="stat-val">{len(movimientos)}</span>
+                                <span class="stat-lbl">Movimientos</span>
+                            </div>
+                            <div class="stat-chip">
+                                <span class="stat-val">{n_lineas}</span>
+                                <span class="stat-lbl">Líneas TXT</span>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                        # Nombre archivo ARBA: AR-CUIT-PERIODO-P7-LOTE.txt
+                        cuit_empresa = metadata.get('cuit_empresa', '').replace('-', '')
+                        periodo_file = f"{anio_p}{mes_p}"  # YYYYMM
+                        arba_download_name = f"AR-{cuit_empresa}-{periodo_file}-P7-1.txt"
+
+                        st.download_button(
+                            label=f"↓  Descargar TXT ({arba_download_name})",
+                            data=txt_arba.encode("latin-1", errors="replace"),
+                            file_name=arba_download_name,
+                            mime="text/plain",
+                            use_container_width=True,
+                        )
+
+                except Exception as e:
+                    st.error(f"Error al procesar el archivo: {str(e)}")
+                    st.exception(e)
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    else:
+        st.markdown("""
+        <div style="
+            text-align: center;
+            padding: 2rem 1rem;
+            font-family: 'Space Mono', monospace;
+            font-size: 0.72rem;
+            color: #6b7280;
+            letter-spacing: 0.12em;
+        ">
+            ESPERANDO ARCHIVO · PASO 01
         </div>
         """, unsafe_allow_html=True)

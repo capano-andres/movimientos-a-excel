@@ -1990,6 +1990,188 @@ def generar_sifere_retenciones_txt(transacciones: list[dict], meta: dict) -> str
     return "\n".join(lineas_txt)
 
 
+def generar_percepciones_arba_txt(transacciones: list[dict], meta: dict) -> str:
+    """Genera un archivo TXT con formato ARBA para percepciones IIBB de ventas.
+    Cada línea (81 chars): CUIT(13) + Fecha(10) + TipoComp(1) + Letra(1) + PV(5)
+    + NroComp(8) + BaseImponible(14) + Alicuota(5) + ImportePerc(13) + Fecha(10) + LetraFija(1)
+    """
+    # ── Mapeo tipo comprobante del sistema → código ARBA (1 char) ──
+    TIPO_COMP_ARBA = {
+        "FC": "F", "TF": "F", "TK": "F",
+        "NC": "C",
+        "ND": "D",
+        "RC": "R",
+    }
+
+    # ── Tasas IVA (para excluirlas al buscar percepciones) ──
+    IVA_RATES = {
+        'Tasa 21%', 'T.21%', 'C.F.21%', 'Tasa 27%', 'T.27%',
+        'Tasa 10.5%', 'Tasa 10,5%', 'T.10.5%', 'T.10,5%',
+        'C.F.10.5%', 'C.F.10,5%', 'Tasa 5%', 'T.5%',
+        'Tasa 2.5%', 'Tasa 2,5%', 'T.2.5%', 'T.2,5%',
+        'T.IMP 21%', 'T.IMP 10%', 'Exento',
+        'R.Monot21', 'R.Mont.10',
+    }
+
+    # ── Palabras clave para identificar percepción IIBB Buenos Aires ──
+    KEYWORDS_BS_AS = ["BS.AS", "BSAS", "BS AS", "BUENOS AIRES"]
+
+    def _es_percepcion_bs_as(nombre: str) -> bool:
+        """Retorna True si el concepto es una percepción IIBB Buenos Aires."""
+        nombre_upper = nombre.upper()
+        if "PERC" not in nombre_upper:
+            return False
+        # Excluir aduanera, IVA, ganancias
+        if any(x in nombre_upper for x in ("ADUA", "I.V.A", "GCIAS", "IVA")):
+            return False
+        return any(kw in nombre_upper for kw in KEYWORDS_BS_AS)
+
+    # ── Extraer periodo (mes/año) del meta ──
+    periodo_str = meta.get('periodo', '')
+    p_match = re.search(r'(\d{2})/(\d{4})', periodo_str)
+    if p_match:
+        mes_periodo = p_match.group(1)
+        anio_periodo = p_match.group(2)
+    else:
+        nums = re.findall(r'\d+', periodo_str)
+        if len(nums) >= 5:
+            mes_periodo = nums[1]
+            anio_periodo = nums[2]
+        else:
+            mes_periodo = "01"
+            anio_periodo = "2025"
+
+    # ── Procesar transacciones ──
+    lineas_txt = []
+
+    for t in transacciones:
+        dia = t['Fecha']
+        tipo = t['Tipo']
+        numero_raw = t['Numero']
+        cuit_raw = t['CUIT'] if t['CUIT'] else ''
+
+        # ── CUIT con guiones (13 chars: XX-XXXXXXXX-X) ──
+        if '-' in cuit_raw:
+            cuit_formateado = cuit_raw
+        else:
+            cuit_limpio = cuit_raw.replace('-', '')
+            if len(cuit_limpio) == 11:
+                cuit_formateado = f"{cuit_limpio[:2]}-{cuit_limpio[2:10]}-{cuit_limpio[10]}"
+            else:
+                cuit_formateado = cuit_limpio
+        cuit_formateado = cuit_formateado[:13].ljust(13)
+
+        # ── Fecha completa DD/MM/YYYY ──
+        fecha_completa = f"{int(dia):02d}/{mes_periodo}/{anio_periodo}"
+
+        # ── Tipo comprobante ARBA (1 char) ──
+        tipo_arba = TIPO_COMP_ARBA.get(tipo, tipo[0] if tipo else "F")
+
+        # ── Separar PV y Nro del número de comprobante ──
+        if '-' in numero_raw:
+            pv_str = numero_raw.split('-')[0]
+            resto_num = numero_raw.split('-')[1]
+        else:
+            pv_str = numero_raw[:5]
+            resto_num = numero_raw[5:]
+
+        # Quitar letra del final si existe → esa es la letra del comprobante
+        if resto_num and resto_num[-1].isalpha():
+            letra_comp = resto_num[-1]
+            nro_str = resto_num[:-1]
+        else:
+            letra_comp = 'A'
+            nro_str = resto_num
+
+        pv_formateado = pv_str[-5:].zfill(5)
+        nro_formateado = nro_str.zfill(8)
+
+        # ── Buscar percepción IIBB BS.AS. en esta transacción ──
+        monto_percepcion = 0.0
+
+        # Desde la tasa principal
+        tasa = t['Tasa']
+        if tasa and tasa not in IVA_RATES and _es_percepcion_bs_as(tasa):
+            monto_percepcion += t['Neto']
+
+        # Desde sub-conceptos
+        for s in t['SubConceptos']:
+            nombre = s['Concepto']
+            if not nombre or nombre in IVA_RATES:
+                continue
+            if _es_percepcion_bs_as(nombre):
+                monto = s['Neto'] if s['Neto'] != 0.0 else s['Percepcion']
+                monto_percepcion += monto
+
+        # Si no hay percepción BS.AS., saltar esta transacción
+        if monto_percepcion == 0.0:
+            continue
+
+        # ── Base imponible = Neto gravado del movimiento ──
+        # Recopilar neto de todas las tasas IVA (excluyendo percepciones/retenciones)
+        base_imponible = 0.0
+
+        # Neto de la tasa principal (si es IVA)
+        if tasa and tasa in IVA_RATES:
+            base_imponible += t['Neto']
+
+        # Neto de sub-conceptos que son tasas IVA
+        for s in t['SubConceptos']:
+            nombre = s['Concepto']
+            if nombre and nombre in IVA_RATES:
+                base_imponible += s['Neto']
+
+        # Si la base es 0, intentar usar el Neto principal
+        if base_imponible == 0.0:
+            base_imponible = t['Neto']
+
+        # ── Calcular alícuota = Percepción / Base * 100 ──
+        if base_imponible != 0.0:
+            alicuota = abs(monto_percepcion) / abs(base_imponible) * 100
+        else:
+            alicuota = 0.0
+
+        # ── Determinar si es NC (montos negativos) ──
+        es_nc = (tipo == 'NC')
+
+        # ── Formatear Base Imponible (14 chars: 11 enteros + . + 2 decimales) ──
+        base_abs = abs(base_imponible)
+        if es_nc:
+            # Signo negativo reemplaza un cero de relleno
+            base_str = f"-{int(base_abs):010d}.{base_abs:.2f}".split('.')
+            base_formateada = f"-{int(base_abs):010d}.{f'{base_abs:.2f}'.split('.')[1]}"
+        else:
+            base_formateada = f"{int(base_abs):011d}.{f'{base_abs:.2f}'.split('.')[1]}"
+
+        # ── Formatear Alícuota (5 chars: 2 enteros + . + 2 decimales) ──
+        alic_formateada = f"{int(alicuota):02d}.{f'{alicuota:.2f}'.split('.')[1]}"
+
+        # ── Formatear Importe Percepción (13 chars: 10 enteros + . + 2 decimales) ──
+        perc_abs = abs(monto_percepcion)
+        if es_nc:
+            perc_formateada = f"-{int(perc_abs):09d}.{f'{perc_abs:.2f}'.split('.')[1]}"
+        else:
+            perc_formateada = f"{int(perc_abs):010d}.{f'{perc_abs:.2f}'.split('.')[1]}"
+
+        # ── Construir línea (81 chars) ──
+        linea = (
+            f"{cuit_formateado}"          # pos 1-13:  CUIT (13)
+            f"{fecha_completa}"           # pos 14-23: Fecha (10)
+            f"{tipo_arba}"                # pos 24:    Tipo comprobante (1)
+            f"{letra_comp}"               # pos 25:    Letra comprobante (1)
+            f"{pv_formateado}"            # pos 26-30: Punto de venta (5)
+            f"{nro_formateado}"           # pos 31-38: Nro comprobante (8)
+            f"{base_formateada}"          # pos 39-52: Base imponible (14)
+            f"{alic_formateada}"          # pos 53-57: Alícuota (5)
+            f"{perc_formateada}"          # pos 58-70: Importe percepción (13)
+            f"{fecha_completa}"           # pos 71-80: Fecha repetida (10)
+            f"A"                          # pos 81:    Letra fija (1)
+        )
+        lineas_txt.append(linea)
+
+    return "\n".join(lineas_txt)
+
+
 def seleccionar_archivo() -> Path:
     """Abre un diálogo para que el usuario seleccione un archivo .txt."""
     import tkinter as tk
