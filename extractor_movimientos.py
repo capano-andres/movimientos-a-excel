@@ -380,9 +380,13 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
         'T.IMP 21%': ('Neto Imp. 21',  'IVA Imp. 21'),
         'T.IMP 10%': ('Neto Imp. 10.5','IVA Imp. 10.5'),
         'Exento':    ('Exento',    None),
-        'R.Monot21': ('Neto Monot. 21', 'IVA Monot. 21'),
-        'R.Mont.10': ('Neto Monot. 10.5', 'IVA Monot. 10.5'),
     }
+
+    # En ventas, expandir monotributo a columnas Neto/IVA; en compras, dejar tasa cruda
+    es_ventas = 'VENTA' in meta.get('tipo_reporte', '').upper()
+    if es_ventas:
+        IVA_RATES['R.Monot21'] = ('Neto Monot. 21', 'IVA Monot. 21')
+        IVA_RATES['R.Mont.10'] = ('Neto Monot. 10.5', 'IVA Monot. 10.5')
     
     DESIRED_IVA_ORDER = [
         'Neto IVA 21', 'IVA 21',
@@ -438,6 +442,16 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
         IVA_COL_ORDER = sorted(list(present_iva_cols)) # fallback
     
     other_cols = list(found_others)  # Preservar orden de aparición del TXT
+
+    # Helper: detectar si un nombre de columna es una deducción (PERC/RET/SIRCREB)
+    _DEDUCCION_KW = ("PERC", "PER.", "PER ", "RET", "SIRCREB", "SIRTAC")
+    def _es_deduccion(nombre: str) -> bool:
+        nu = nombre.upper()
+        return any(kw in nu for kw in _DEDUCCION_KW)
+
+    # Ordenar: primero no-deducciones (amarillo), luego deducciones (verde)
+    other_cols = [c for c in other_cols if not _es_deduccion(c)] + \
+                 [c for c in other_cols if _es_deduccion(c)]
 
     rows = []
     for t in transacciones:
@@ -584,6 +598,8 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
         col_list = list(df.columns)
         iva_set = set(IVA_COL_ORDER)
         other_set = set(other_cols)
+        # Deducciones (PERC/PER./RET/SIRCREB) → verde; otros impuestos → amarillo
+        deduccion_set = {c for c in other_cols if _es_deduccion(c)}
 
         # Los encabezados ahora van en la fila 6
         header_row = 6
@@ -594,9 +610,9 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
             cell.alignment = header_align
             cell.border = thin_border
             col_name = col_list[col_idx - 1]
-            if col_name in iva_set:
+            if col_name in iva_set or (col_name in other_set and col_name not in deduccion_set):
                 cell.fill = iva_header_fill
-            elif col_name in other_set:
+            elif col_name in deduccion_set:
                 cell.fill = perc_header_fill
             else:
                 cell.fill = header_fill
@@ -716,7 +732,7 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
             resumen = df.copy()
         
             # Separar conceptos en Deducciones (PERC/RET) y Otros (IMP.CIG, etc.)
-            deduccion_cols = [c for c in other_cols if "PERC" in c.upper() or "RET" in c.upper() or "SIRCREB" in c.upper()]
+            deduccion_cols = [c for c in other_cols if _es_deduccion(c)]
             individual_other_cols = [c for c in other_cols if c not in deduccion_cols]
         
             res_header_row = 6
@@ -1692,7 +1708,16 @@ def generar_sifere_txt(transacciones: list[dict], meta: dict) -> str:
         dia = t['Fecha']
         tipo = t['Tipo']
         numero_raw = t['Numero']
-        cuit_raw = t['CUIT'].replace('-', '') if t['CUIT'] else ''
+        cuit_raw = t['CUIT'] if t['CUIT'] else ''
+        # Formatear CUIT con guiones: XX-XXXXXXXX-X (13 chars)
+        if '-' in cuit_raw:
+            cuit_formateado = cuit_raw
+        else:
+            cuit_limpio = cuit_raw.replace('-', '')
+            if len(cuit_limpio) == 11:
+                cuit_formateado = f"{cuit_limpio[:2]}-{cuit_limpio[2:10]}-{cuit_limpio[10]}"
+            else:
+                cuit_formateado = cuit_limpio
 
         # Separar PV y Nro del número de comprobante
         if '-' in numero_raw:
@@ -1779,7 +1804,7 @@ def generar_sifere_txt(transacciones: list[dict], meta: dict) -> str:
             # Construir línea
             linea = (
                 f"{codigo}"
-                f"{cuit_raw}"
+                f"{cuit_formateado}"
                 f"{fecha_completa}"
                 f"{comprobante_sifere}"
                 f"{monto_formateado}"
