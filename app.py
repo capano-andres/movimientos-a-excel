@@ -1720,13 +1720,18 @@ elif herramienta == TOOL_DEDUCCIONES:
                     cols_drop = []
                     for c in df_ded.columns:
                         cl = c.lower()
-                        if 'denominaci' in cl and 'raz' in cl:
-                            cols_drop.append(c)
-                        elif c.strip() == 'Impuesto' or c.strip() == 'Régimen':
+                        if c.strip() == 'Impuesto' or c.strip() == 'Régimen':
                             cols_drop.append(c)
                     df_ded = df_ded.drop(columns=[c for c in cols_drop if c in df_ded.columns], errors='ignore')
 
                     # ── Renombrar columnas ──
+                    # Detectar y renombrar la columna de Razón Social dinámicamente
+                    for c in df_ded.columns:
+                        cl = c.lower()
+                        if 'denominaci' in cl and 'raz' in cl:
+                            df_ded = df_ded.rename(columns={c: 'Razón Social'})
+                            break
+
                     RENAME_DED = {
                         'CUIT Agente Ret./Perc.': 'CUIT',
                         'Descripción Impuesto': 'Impuesto',
