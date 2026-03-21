@@ -7,7 +7,7 @@ import PyPDF2
 from pathlib import Path
 from openpyxl.styles import Border, Side, Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
-from extractor_movimientos import parsear_archivo, crear_excel, generar_sifere_txt, generar_sifere_retenciones_txt, generar_percepciones_arba_txt
+from extractor_movimientos import parsear_archivo, crear_excel, generar_sifere_txt, generar_sifere_retenciones_txt, generar_percepciones_arba_txt, CONCEPTOS_MAP
 
 # --- Page Config ---
 st.set_page_config(
@@ -376,10 +376,11 @@ TOOL_SIFERE = "Archivos SIFERE (.txt)"
 TOOL_LIQUIDACIONES = "Liquidaciones Tarjeta (.pdf)"
 TOOL_DEDUCCIONES = "Limpieza Excel Deducciones IVA/Ganancias"
 TOOL_ARBA = "Archivo Agente de Percepciones ARBA (.txt)"
+TOOL_CRUCE_CONCEPTO = "Cruce (TXT + Excel Sistema)"
 
 herramienta = st.selectbox(
     "Seleccioná la herramienta:",
-    options=[TOOL_MOVIMIENTOS, TOOL_PORTAL_IVA, TOOL_SIFERE, TOOL_ARBA, TOOL_LIQUIDACIONES, TOOL_DEDUCCIONES],
+    options=[TOOL_MOVIMIENTOS, TOOL_PORTAL_IVA, TOOL_SIFERE, TOOL_ARBA, TOOL_LIQUIDACIONES, TOOL_DEDUCCIONES, TOOL_CRUCE_CONCEPTO],
     index=0,
 )
 
@@ -2023,5 +2024,314 @@ elif herramienta == TOOL_ARBA:
             letter-spacing: 0.12em;
         ">
             ESPERANDO ARCHIVO · PASO 01
+        </div>
+        """, unsafe_allow_html=True)
+
+
+elif herramienta == TOOL_CRUCE_CONCEPTO:
+    # ───────────────────────────────────────────────────────────────────────────────
+    # HERRAMIENTA: Cruce Concepto (TXT + Excel Sistema)
+    # ───────────────────────────────────────────────────────────────────────────────
+    st.markdown('<div class="card"><div class="card-label">01 · Archivo TXT (Comprobantes)</div>', unsafe_allow_html=True)
+    uploaded_txt_concepto = st.file_uploader(
+        "Subí el .txt de Comprobantes de Compras (del sistema)",
+        type=["txt", "prn"],
+        label_visibility="visible",
+        key="cruce_concepto_txt"
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="card"><div class="card-label">02 · Archivo Excel Sistema (.xls)</div>', unsafe_allow_html=True)
+    uploaded_xls_concepto = st.file_uploader(
+        "Subí el Excel del sistema (.xls) con las compras",
+        type=["xls", "xlsx"],
+        label_visibility="visible",
+        key="cruce_concepto_xls"
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if uploaded_txt_concepto and uploaded_xls_concepto:
+        st.success(f"**{uploaded_txt_concepto.name}** + **{uploaded_xls_concepto.name}** listos para cruzar")
+
+        st.markdown('<div class="card"><div class="card-label">03 · Procesar</div>', unsafe_allow_html=True)
+
+        if st.button("⬡  Cruzar Concepto"):
+            try:
+                with st.spinner("Parseando TXT..."):
+                    txt_content = uploaded_txt_concepto.getvalue().decode("latin-1")
+                    transacciones, meta_txt = parsear_archivo(content=txt_content)
+
+                if not transacciones:
+                    st.error("No se encontraron transacciones en el TXT. Verificá el formato.")
+                else:
+                    with st.spinner("Leyendo Excel Sistema..."):
+                        df_xls = pd.read_excel(io.BytesIO(uploaded_xls_concepto.getvalue()))
+
+                        # Limpiar: quitar filas completamente vacías y fila de TOTALES
+                        df_xls = df_xls.dropna(how='all')
+                        # Buscar TOTALES en Fecha, Nombre y Cond (donde suele estar)
+                        for col_check in ['Fecha', 'Nombre', 'Cond']:
+                            if col_check in df_xls.columns:
+                                df_xls = df_xls[~df_xls[col_check].astype(str).str.upper().str.contains('TOTAL', na=False)]
+                        df_xls = df_xls.reset_index(drop=True)
+
+                    # ── Construir lookup de Concepto desde TXT ──────────────
+                    # Clave: tipo + pv + nro (sin letra) + cuit (sin guiones)
+                    concepto_lookup = {}
+                    for t in transacciones:
+                        numero_raw = t['Numero']
+                        pv_txt = numero_raw.split('-')[0] if '-' in numero_raw else numero_raw[:5]
+                        resto_num = numero_raw.split('-')[1] if '-' in numero_raw else numero_raw[5:]
+                        # Quitar letra final del nro
+                        nro_txt = resto_num[:-1] if resto_num and resto_num[-1].isalpha() else resto_num
+                        cuit_txt = t['CUIT'].replace('-', '')
+
+                        # Normalizar: quitar ceros a la izquierda del PV y Nro
+                        try:
+                            pv_norm = str(int(pv_txt))
+                        except ValueError:
+                            pv_norm = pv_txt
+                        try:
+                            nro_norm = str(int(nro_txt))
+                        except ValueError:
+                            nro_norm = nro_txt
+
+                        key = f"{t['Tipo']}|{pv_norm}|{nro_norm}|{cuit_txt}"
+                        concepto_lookup[key] = (t['Concepto'], t['Letra'])
+
+                    # ── Parsear columnas del Excel ──────────────────────────
+                    # El Excel tiene: Fecha, TC, Numero, Nombre, Cond, C.U.I.T., ...
+                    # Numero tiene formato "PPPPP-NNNNNNNNNN/L" o similar
+                    def extraer_key_xls(row):
+                        tc = str(row.get('TC', '')).strip()
+                        numero = str(row.get('Numero', '')).strip()
+                        cuit = str(row.get('C.U.I.T.', '')).replace('-', '').replace('.', '').strip()
+
+                        # Separar PV y Nro del campo Numero (ej: 00003-00021793/A)
+                        if '-' in numero:
+                            parts = numero.split('-', 1)
+                            pv_raw = parts[0]
+                            nro_raw = parts[1]
+                        elif '/' in numero:
+                            parts = numero.split('/', 1)
+                            pv_raw = parts[0]
+                            nro_raw = parts[1]
+                        else:
+                            pv_raw = numero[:5] if len(numero) >= 5 else numero
+                            nro_raw = numero[5:] if len(numero) > 5 else ''
+
+                        # Quitar letra y / del nro
+                        nro_clean = re.sub(r'[/A-Za-z]+$', '', nro_raw).strip()
+
+                        try:
+                            pv_norm = str(int(pv_raw))
+                        except ValueError:
+                            pv_norm = pv_raw
+                        try:
+                            nro_norm = str(int(nro_clean))
+                        except ValueError:
+                            nro_norm = nro_clean
+
+                        return f"{tc}|{pv_norm}|{nro_norm}|{cuit}"
+
+                    with st.spinner("Cruzando datos..."):
+                        # Filas "cabecera" son las que tienen Fecha; las demás son sub-filas del mismo movimiento
+                        mask_header = df_xls['Fecha'].notna() & (df_xls['Fecha'] != '')
+
+                        # Agregar columnas de Concepto y Jurisdicción
+                        conceptos_cod = []
+                        jurisdicciones = []
+                        matched = 0
+                        last_concepto = ''
+                        last_jur = ''
+                        for idx, row in df_xls.iterrows():
+                            if mask_header.iloc[idx]:
+                                # Es fila cabecera → buscar concepto y jurisdicción
+                                key = extraer_key_xls(row)
+                                result = concepto_lookup.get(key)
+                                if result is not None:
+                                    matched += 1
+                                    last_concepto, last_jur = result
+                                else:
+                                    last_concepto = ''
+                                    last_jur = ''
+                                conceptos_cod.append(last_concepto)
+                                jurisdicciones.append(last_jur)
+                            else:
+                                # Sub-fila → propagar de la cabecera
+                                conceptos_cod.append(last_concepto)
+                                jurisdicciones.append(last_jur)
+
+                        # Insertar Concepto y Jurisdicción después de C.U.I.T.
+                        cuit_pos = df_xls.columns.get_loc('C.U.I.T.') + 1 if 'C.U.I.T.' in df_xls.columns else len(df_xls.columns)
+                        df_xls.insert(cuit_pos, 'Concepto', conceptos_cod)
+                        df_xls.insert(cuit_pos + 1, 'Jur.', jurisdicciones)
+
+                        # Forward-fill columnas identificatorias a sub-filas
+                        for col_ff in ['Fecha', 'TC', 'Numero', 'Nombre', 'Cond', 'C.U.I.T.', 'Concepto', 'Jur.']:
+                            if col_ff in df_xls.columns:
+                                df_xls[col_ff] = df_xls[col_ff].ffill()
+
+                        # Separar Fecha (dd/mm/yyyy) en Dia, Mes, Año
+                        if 'Fecha' in df_xls.columns:
+                            fecha_pos = df_xls.columns.get_loc('Fecha')
+                            fecha_str = df_xls['Fecha'].astype(str)
+                            # Intentar parsear como dd/mm/yyyy
+                            partes_fecha = fecha_str.str.split('/', expand=True)
+                            if partes_fecha.shape[1] >= 3:
+                                df_xls.insert(fecha_pos, 'Dia', pd.to_numeric(partes_fecha[0], errors='coerce').fillna(0).astype(int))
+                                df_xls.insert(fecha_pos + 1, 'Mes', pd.to_numeric(partes_fecha[1], errors='coerce').fillna(0).astype(int))
+                                df_xls.insert(fecha_pos + 2, 'Año', pd.to_numeric(partes_fecha[2], errors='coerce').fillna(0).astype(int))
+                                df_xls.drop(columns=['Fecha'], inplace=True)
+
+                        if 'Numero' in df_xls.columns:
+                            num_pos = df_xls.columns.get_loc('Numero')
+                            def split_numero(val):
+                                s = str(val).strip()
+                                # Quitar /Letra o Letra final del numero
+                                letra = ''
+                                if '/' in s:
+                                    parts = s.rsplit('/', 1)
+                                    s = parts[0]
+                                    letra = parts[1] if len(parts) > 1 else ''
+                                elif s and s[-1].isalpha():
+                                    letra = s[-1]
+                                    s = s[:-1]
+                                return s, letra
+
+                            numero_list, letra_list = [], []
+                            for val in df_xls['Numero']:
+                                numero, letra = split_numero(val)
+                                numero_list.append(numero)
+                                letra_list.append(letra)
+
+                            df_xls['Numero'] = numero_list
+                            df_xls.insert(num_pos + 1, 'Letra', letra_list)
+
+                        # Formatear CUIT con guiones (XX-XXXXXXXX-X)
+                        if 'C.U.I.T.' in df_xls.columns:
+                            def fmt_cuit(val):
+                                s = str(val).replace('-', '').replace('.', '').replace(' ', '').strip()
+                                # Quitar .0 si viene de float
+                                if s.endswith('.0'):
+                                    s = s[:-2]
+                                if len(s) == 11 and s.isdigit():
+                                    return f"{s[:2]}-{s[2:10]}-{s[10]}"
+                                return s
+                            df_xls['C.U.I.T.'] = df_xls['C.U.I.T.'].apply(fmt_cuit)
+
+                        # Rellenar y convertir columnas monetarias a numérico
+                        for col_fill in ['Neto', 'Iva', 'Sobretasa', 'Retenciones']:
+                            if col_fill in df_xls.columns:
+                                df_xls[col_fill] = pd.to_numeric(df_xls[col_fill], errors='coerce').fillna(0)
+
+                    total_valid = mask_header.sum()
+                    not_found = total_valid - matched
+
+                    st.success("✓  Cruce completado")
+
+                    # Stats
+                    st.markdown(f"""
+                    <div class="stats-row">
+                        <div class="stat-chip">
+                            <span class="stat-val">{total_valid}</span>
+                            <span class="stat-lbl">Comprobantes</span>
+                        </div>
+                        <div class="stat-chip">
+                            <span class="stat-val">{matched}</span>
+                            <span class="stat-lbl">Matcheados</span>
+                        </div>
+                        <div class="stat-chip">
+                            <span class="stat-val">{not_found}</span>
+                            <span class="stat-lbl">No encontrados</span>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    if not_found > 0:
+                        st.warning(f"**{not_found}** comprobantes del Excel no fueron encontrados en el TXT")
+
+                    # ── Generar Excel de salida con formato ──────────────
+                    from openpyxl.styles import Border, Side, Font, PatternFill, Alignment
+                    from openpyxl.utils import get_column_letter
+
+                    output = io.BytesIO()
+                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                        # startrow=4 → encabezados columna en fila 5, datos desde fila 6
+                        df_xls.to_excel(writer, sheet_name='Movimientos', index=False, startrow=4)
+                        ws = writer.sheets['Movimientos']
+
+                        total_cols = len(df_xls.columns)
+                        last_col_letter = get_column_letter(total_cols)
+                        center_align = Alignment(horizontal='center', vertical='center')
+
+                        # ── Encabezado con datos del cliente ──────────────
+                        ws.merge_cells(f'A1:{last_col_letter}1')
+                        ws['A1'] = meta_txt.get('razon_social', 'CONTRIBUYENTE').upper()
+                        ws['A1'].font = Font(bold=True, size=14, color='FFFFFF')
+                        ws['A1'].fill = PatternFill('solid', fgColor='2F5496')
+                        ws['A1'].alignment = center_align
+
+                        ws.merge_cells(f'A2:{last_col_letter}2')
+                        tipo_rep = meta_txt.get('tipo_reporte', 'COMPRAS')
+                        ws['A2'] = tipo_rep.upper()
+                        ws['A2'].font = Font(bold=True, size=12, color='C00000')
+                        ws['A2'].alignment = center_align
+
+                        ws.merge_cells(f'A3:{last_col_letter}3')
+                        ws['A3'] = f"CUIT: {meta_txt.get('cuit_empresa', '')} | Periodo: {meta_txt.get('periodo', '')}"
+                        ws['A3'].font = Font(bold=True, size=11, color='2F5496')
+                        ws['A3'].alignment = center_align
+
+                        # ── Estilo encabezados de columna (fila 5) ────────
+                        header_font = Font(bold=True, size=10, color='FFFFFF')
+                        header_fill = PatternFill('solid', fgColor='4472C4')
+                        header_align = Alignment(horizontal='center', vertical='center', wrap_text=True)
+                        for col_idx in range(1, total_cols + 1):
+                            cell = ws.cell(row=5, column=col_idx)
+                            cell.font = header_font
+                            cell.fill = header_fill
+                            cell.alignment = header_align
+
+                        # ── Formato numérico con 2 decimales, rojo si negativo ──
+                        num_fmt_red = '$#,##0.00;[Red]-$#,##0.00'
+                        col_list_xls = list(df_xls.columns)
+                        money_cols_xls = ['Neto', 'Iva', 'Sobretasa', 'Retenciones', 'Total']
+                        money_indices = [col_list_xls.index(c) + 1 for c in money_cols_xls if c in col_list_xls]
+
+                        data_start_row = 6
+                        for row in range(data_start_row, len(df_xls) + data_start_row):
+                            for col_idx in money_indices:
+                                cell = ws.cell(row=row, column=col_idx)
+                                cell.number_format = num_fmt_red
+
+                    output.seek(0)
+
+                    xls_name = Path(uploaded_xls_concepto.name).stem
+                    st.download_button(
+                        label="↓  Descargar Movimientos",
+                        data=output,
+                        file_name=f"Movimientos.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                    )
+
+            except Exception as e:
+                st.error(f"Error al procesar: {str(e)}")
+                st.exception(e)
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    else:
+        st.markdown("""
+        <div style="
+            text-align: center;
+            padding: 2rem 1rem;
+            font-family: 'Space Mono', monospace;
+            font-size: 0.72rem;
+            color: #6b7280;
+            letter-spacing: 0.12em;
+        ">
+            SUBÍ AMBOS ARCHIVOS · TXT + EXCEL SISTEMA
         </div>
         """, unsafe_allow_html=True)
