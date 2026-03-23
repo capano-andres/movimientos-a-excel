@@ -373,7 +373,7 @@ st.markdown("""
 TOOL_MOVIMIENTOS = "Extracción de Movimientos (.txt)"
 TOOL_PORTAL_IVA = "Movimientos Portal IVA limpio (.zip)"
 TOOL_SIFERE = "Archivos SIFERE (.txt)"
-TOOL_LIQUIDACIONES = "Liquidaciones Tarjeta (.pdf)"
+TOOL_LIQUIDACIONES = "Liquidaciones Tarjeta FISERV (.pdf)"
 TOOL_DEDUCCIONES = "Limpieza Excel Deducciones IVA/Ganancias"
 TOOL_ARBA = "Archivo Agente de Percepciones ARBA (.txt)"
 TOOL_CRUCE_CONCEPTO = "Cruce (TXT + Excel Sistema)"
@@ -1212,11 +1212,15 @@ elif herramienta == TOOL_LIQUIDACIONES:
                                 capturar = False
                                 cbu_match = re.search(r"\d{1,3}(\.\d{3})*,\d+\-?\s+(\d+)", linea)
                                 nro_cbu = cbu_match.group(1) if cbu_match else "No se encontró Número de Liquidación"
-                                fecha_match = re.search(r"(\d{2}/\d{2}/\d{4})", linea.split("Nro. Liq:")[1]) if "Liq:" in linea else None
+                                # Extraer ambas fechas: Pago y Presentación
+                                # PyPDF2 extrae primero la fecha de presentación y luego la de pago
+                                todas_fechas = re.findall(r"(\d{2}/\d{2}/\d{4})", linea)
+                                fecha_pres = todas_fechas[0] if len(todas_fechas) >= 1 else "No se encontró fecha"
+                                fecha_pago = todas_fechas[-1] if len(todas_fechas) >= 2 else fecha_pres
                                 if cbu_match:
                                     movimiento["Liquidacion"] = cbu_match.group(2) + ".00"
-                                fecha_liq = fecha_match.group(1) if fecha_match else "No se encontró fecha"
-                                movimiento["Fecha"] = fecha_liq
+                                movimiento["Fecha Pago"] = fecha_pago
+                                movimiento["Fecha Pres."] = fecha_pres
                                 if nro_cbu != "No se encontró Número de Liquidación":
                                     movimiento["Liquidacion"] = round(float(movimiento["Liquidacion"]))
                                     movimientos.append(movimiento.copy())
@@ -1263,15 +1267,15 @@ elif herramienta == TOOL_LIQUIDACIONES:
                                     df_total["QR RETENCION IIBB"] = df_total[col_acred]
 
                             columnas_qr = [col for col in df_total.columns if col.startswith("QR")]
-                            df_qr = df_total[df_total[columnas_qr].sum(axis=1) != 0][["Fecha", "Liquidacion"] + columnas_qr] if columnas_qr else None
+                            df_qr = df_total[df_total[columnas_qr].sum(axis=1) != 0][["Fecha Pago", "Fecha Pres.", "Liquidacion"] + columnas_qr] if columnas_qr else None
                             columnas_ajuste = [col for col in df_total.columns if "AJUSTE" in col]
-                            df_ajuste = df_total[df_total[columnas_ajuste].sum(axis=1) != 0][["Fecha", "Liquidacion"] + columnas_ajuste] if columnas_ajuste else None
+                            df_ajuste = df_total[df_total[columnas_ajuste].sum(axis=1) != 0][["Fecha Pago", "Fecha Pres.", "Liquidacion"] + columnas_ajuste] if columnas_ajuste else None
 
                             df_movimientos = df_total.drop(columns=columnas_qr + columnas_ajuste)
                             columnas_importe_neto = [col for col in df_movimientos.columns if "IMPORTE NETO" in col]
                             columnas_ventas = [col for col in df_movimientos.columns if col.startswith("VENTAS")]
-                            columnas_restantes = [col for col in df_movimientos.columns if col not in columnas_importe_neto + columnas_ventas + ["Fecha", "Liquidacion"]]
-                            df_movimientos = df_movimientos[["Fecha", "Liquidacion"] + columnas_restantes + columnas_importe_neto + columnas_ventas]
+                            columnas_restantes = [col for col in df_movimientos.columns if col not in columnas_importe_neto + columnas_ventas + ["Fecha Pago", "Fecha Pres.", "Liquidacion"]]
+                            df_movimientos = df_movimientos[["Fecha Pago", "Fecha Pres.", "Liquidacion"] + columnas_restantes + columnas_importe_neto + columnas_ventas]
 
                             # Obtener primer numero de liquidacion
                             primer_liq = str(int(df_movimientos["Liquidacion"].iloc[0])) if len(df_movimientos) > 0 else "0"
@@ -1603,11 +1607,11 @@ elif herramienta == TOOL_LIQUIDACIONES:
 
                                 # Formatear hojas
                                 wb = writer.book
-                                formatear_hoja_liq(wb["Liquidaciones"], df_movimientos, ["A", "B"], encabezado_fc, banco, mostrar_resumen=True)
+                                formatear_hoja_liq(wb["Liquidaciones"], df_movimientos, ["A", "B", "C"], encabezado_fc, banco, mostrar_resumen=True)
                                 if df_qr is not None:
-                                    formatear_hoja_liq(wb["QR"], df_qr, ["A", "B"], encabezado_fc, "First Data", mostrar_resumen=False)
+                                    formatear_hoja_liq(wb["QR"], df_qr, ["A", "B", "C"], encabezado_fc, "First Data", mostrar_resumen=False)
                                 if df_ajuste is not None:
-                                    formatear_hoja_liq(wb["AJUSTE"], df_ajuste, ["A", "B"], encabezado_fc, banco, mostrar_resumen=False)
+                                    formatear_hoja_liq(wb["AJUSTE"], df_ajuste, ["A", "B", "C"], encabezado_fc, banco, mostrar_resumen=False)
 
                             output.seek(0)
 
