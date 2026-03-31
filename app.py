@@ -2073,10 +2073,14 @@ elif herramienta == TOOL_CRUCE_CONCEPTO:
 
                         # Limpiar: quitar filas completamente vacías y fila de TOTALES
                         df_xls = df_xls.dropna(how='all')
-                        # Buscar TOTALES en Fecha, Nombre y Cond (donde suele estar)
-                        for col_check in ['Fecha', 'Nombre', 'Cond']:
+                        # Buscar TOTALES en Fecha y Cond (donde suele estar)
+                        for col_check in ['Fecha', 'Cond']:
                             if col_check in df_xls.columns:
                                 df_xls = df_xls[~df_xls[col_check].astype(str).str.upper().str.contains('TOTAL', na=False)]
+                        # En Nombre, solo eliminar la fila de resumen (valor exacto tipo "TOTALES" o "TOTAL GENERAL")
+                        # NO eliminar empresas cuyo nombre contenga "TOTAL" (ej: "ELECTRICIDAD TOTAL S.A.")
+                        if 'Nombre' in df_xls.columns:
+                            df_xls = df_xls[~df_xls['Nombre'].astype(str).str.strip().str.upper().str.match(r'^TOTALE?S?\s*$|^TOTAL\s+GENERAL', na=False)]
                         df_xls = df_xls.reset_index(drop=True)
 
                     # ── Construir lookup de Concepto desde TXT ──────────────
