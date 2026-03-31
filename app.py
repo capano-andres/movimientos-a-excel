@@ -2057,7 +2057,20 @@ elif herramienta == TOOL_CRUCE_CONCEPTO:
     if uploaded_txt_concepto and uploaded_xls_concepto:
         st.success(f"**{uploaded_txt_concepto.name}** + **{uploaded_xls_concepto.name}** listos para cruzar")
 
-        st.markdown('<div class="card"><div class="card-label">03 · Procesar</div>', unsafe_allow_html=True)
+        st.markdown('<div class="card"><div class="card-label">03 · Formato de salida</div>', unsafe_allow_html=True)
+        FMT_SISTEMA = "Formato Sistema (un impuesto por fila)"
+        FMT_CONSOLIDADO = "Formato Consolidado (un comprobante por fila)"
+        formato_cruce = st.radio(
+            "Seleccioná el formato de salida:",
+            options=[FMT_SISTEMA, FMT_CONSOLIDADO],
+            index=0,
+            help="**Sistema**: mantiene la estructura del Excel (varias filas por comprobante, una por tasa). "
+                 "**Consolidado**: una fila por comprobante con columnas separadas para cada tasa de IVA.",
+            key="cruce_formato"
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="card"><div class="card-label">04 · Procesar</div>', unsafe_allow_html=True)
 
         if st.button("⬡  Cruzar Concepto"):
             try:
@@ -2149,6 +2162,7 @@ elif herramienta == TOOL_CRUCE_CONCEPTO:
                         # Agregar columnas de Concepto y Jurisdicción
                         conceptos_cod = []
                         jurisdicciones = []
+                        fecha_from_xls = {}  # key → fecha completa del Excel
                         matched = 0
                         last_concepto = ''
                         last_jur = ''
@@ -2160,6 +2174,8 @@ elif herramienta == TOOL_CRUCE_CONCEPTO:
                                 if result is not None:
                                     matched += 1
                                     last_concepto, last_jur = result
+                                    # Guardar fecha completa del Excel para el formato consolidado
+                                    fecha_from_xls[key] = str(row.get('Fecha', '')).strip()
                                 else:
                                     last_concepto = ''
                                     last_jur = ''
@@ -2259,70 +2275,107 @@ elif herramienta == TOOL_CRUCE_CONCEPTO:
                     if not_found > 0:
                         st.warning(f"**{not_found}** comprobantes del Excel no fueron encontrados en el TXT")
 
-                    # ── Generar Excel de salida con formato ──────────────
-                    from openpyxl.styles import Border, Side, Font, PatternFill, Alignment
-                    from openpyxl.utils import get_column_letter
+                    if formato_cruce == FMT_CONSOLIDADO:
+                        # ── Formato Consolidado: usar crear_excel del TXT ──
+                        # Una fila por comprobante, con columnas por cada tasa
+                        # Enriquecer transacciones con la fecha completa del Excel
+                        for t in transacciones:
+                            numero_raw = t['Numero']
+                            pv_txt = numero_raw.split('-')[0] if '-' in numero_raw else numero_raw[:5]
+                            resto_num = numero_raw.split('-')[1] if '-' in numero_raw else numero_raw[5:]
+                            nro_txt = resto_num[:-1] if resto_num and resto_num[-1].isalpha() else resto_num
+                            cuit_txt = t['CUIT'].replace('-', '')
+                            try:
+                                pv_n = str(int(pv_txt))
+                            except ValueError:
+                                pv_n = pv_txt
+                            try:
+                                nro_n = str(int(nro_txt))
+                            except ValueError:
+                                nro_n = nro_txt
+                            tkey = f"{t['Tipo']}|{pv_n}|{nro_n}|{cuit_txt}"
+                            if tkey in fecha_from_xls:
+                                t['Fecha'] = fecha_from_xls[tkey]
 
-                    output = io.BytesIO()
-                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                        # startrow=4 → encabezados columna en fila 5, datos desde fila 6
-                        df_xls.to_excel(writer, sheet_name='Movimientos', index=False, startrow=4)
-                        ws = writer.sheets['Movimientos']
+                        with st.spinner("Generando Excel consolidado..."):
+                            output = io.BytesIO()
+                            crear_excel(transacciones, meta_txt, output,
+                                        con_resumenes=False,
+                                        con_auxiliar=False)
+                            output.seek(0)
 
-                        total_cols = len(df_xls.columns)
-                        last_col_letter = get_column_letter(total_cols)
-                        center_align = Alignment(horizontal='center', vertical='center')
+                        st.download_button(
+                            label="↓  Descargar Consolidado",
+                            data=output,
+                            file_name="Movimientos_Consolidado.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True,
+                        )
 
-                        # ── Encabezado con datos del cliente ──────────────
-                        ws.merge_cells(f'A1:{last_col_letter}1')
-                        ws['A1'] = meta_txt.get('razon_social', 'CONTRIBUYENTE').upper()
-                        ws['A1'].font = Font(bold=True, size=14, color='FFFFFF')
-                        ws['A1'].fill = PatternFill('solid', fgColor='2F5496')
-                        ws['A1'].alignment = center_align
+                    else:
+                        # ── Formato Sistema: Excel enriquecido con Concepto/Jur ──
+                        from openpyxl.styles import Border, Side, Font, PatternFill, Alignment
+                        from openpyxl.utils import get_column_letter
 
-                        ws.merge_cells(f'A2:{last_col_letter}2')
-                        tipo_rep = meta_txt.get('tipo_reporte', 'COMPRAS')
-                        ws['A2'] = tipo_rep.upper()
-                        ws['A2'].font = Font(bold=True, size=12, color='C00000')
-                        ws['A2'].alignment = center_align
+                        output = io.BytesIO()
+                        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                            # startrow=4 → encabezados columna en fila 5, datos desde fila 6
+                            df_xls.to_excel(writer, sheet_name='Movimientos', index=False, startrow=4)
+                            ws = writer.sheets['Movimientos']
 
-                        ws.merge_cells(f'A3:{last_col_letter}3')
-                        ws['A3'] = f"CUIT: {meta_txt.get('cuit_empresa', '')} | Periodo: {meta_txt.get('periodo', '')}"
-                        ws['A3'].font = Font(bold=True, size=11, color='2F5496')
-                        ws['A3'].alignment = center_align
+                            total_cols = len(df_xls.columns)
+                            last_col_letter = get_column_letter(total_cols)
+                            center_align = Alignment(horizontal='center', vertical='center')
 
-                        # ── Estilo encabezados de columna (fila 5) ────────
-                        header_font = Font(bold=True, size=10, color='FFFFFF')
-                        header_fill = PatternFill('solid', fgColor='4472C4')
-                        header_align = Alignment(horizontal='center', vertical='center', wrap_text=True)
-                        for col_idx in range(1, total_cols + 1):
-                            cell = ws.cell(row=5, column=col_idx)
-                            cell.font = header_font
-                            cell.fill = header_fill
-                            cell.alignment = header_align
+                            # ── Encabezado con datos del cliente ──────────────
+                            ws.merge_cells(f'A1:{last_col_letter}1')
+                            ws['A1'] = meta_txt.get('razon_social', 'CONTRIBUYENTE').upper()
+                            ws['A1'].font = Font(bold=True, size=14, color='FFFFFF')
+                            ws['A1'].fill = PatternFill('solid', fgColor='2F5496')
+                            ws['A1'].alignment = center_align
 
-                        # ── Formato numérico con 2 decimales, rojo si negativo ──
-                        num_fmt_red = '$#,##0.00;[Red]-$#,##0.00'
-                        col_list_xls = list(df_xls.columns)
-                        money_cols_xls = ['Neto', 'Iva', 'Sobretasa', 'Retenciones', 'Total']
-                        money_indices = [col_list_xls.index(c) + 1 for c in money_cols_xls if c in col_list_xls]
+                            ws.merge_cells(f'A2:{last_col_letter}2')
+                            tipo_rep = meta_txt.get('tipo_reporte', 'COMPRAS')
+                            ws['A2'] = tipo_rep.upper()
+                            ws['A2'].font = Font(bold=True, size=12, color='C00000')
+                            ws['A2'].alignment = center_align
 
-                        data_start_row = 6
-                        for row in range(data_start_row, len(df_xls) + data_start_row):
-                            for col_idx in money_indices:
-                                cell = ws.cell(row=row, column=col_idx)
-                                cell.number_format = num_fmt_red
+                            ws.merge_cells(f'A3:{last_col_letter}3')
+                            ws['A3'] = f"CUIT: {meta_txt.get('cuit_empresa', '')} | Periodo: {meta_txt.get('periodo', '')}"
+                            ws['A3'].font = Font(bold=True, size=11, color='2F5496')
+                            ws['A3'].alignment = center_align
 
-                    output.seek(0)
+                            # ── Estilo encabezados de columna (fila 5) ────────
+                            header_font = Font(bold=True, size=10, color='FFFFFF')
+                            header_fill = PatternFill('solid', fgColor='4472C4')
+                            header_align = Alignment(horizontal='center', vertical='center', wrap_text=True)
+                            for col_idx in range(1, total_cols + 1):
+                                cell = ws.cell(row=5, column=col_idx)
+                                cell.font = header_font
+                                cell.fill = header_fill
+                                cell.alignment = header_align
 
-                    xls_name = Path(uploaded_xls_concepto.name).stem
-                    st.download_button(
-                        label="↓  Descargar Movimientos",
-                        data=output,
-                        file_name=f"Movimientos.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
-                    )
+                            # ── Formato numérico con 2 decimales, rojo si negativo ──
+                            num_fmt_red = '$#,##0.00;[Red]-$#,##0.00'
+                            col_list_xls = list(df_xls.columns)
+                            money_cols_xls = ['Neto', 'Iva', 'Sobretasa', 'Retenciones', 'Total']
+                            money_indices = [col_list_xls.index(c) + 1 for c in money_cols_xls if c in col_list_xls]
+
+                            data_start_row = 6
+                            for row in range(data_start_row, len(df_xls) + data_start_row):
+                                for col_idx in money_indices:
+                                    cell = ws.cell(row=row, column=col_idx)
+                                    cell.number_format = num_fmt_red
+
+                        output.seek(0)
+
+                        st.download_button(
+                            label="↓  Descargar Movimientos",
+                            data=output,
+                            file_name="Movimientos.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True,
+                        )
 
             except Exception as e:
                 st.error(f"Error al procesar: {str(e)}")
