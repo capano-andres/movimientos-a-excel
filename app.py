@@ -1401,15 +1401,17 @@ elif herramienta == TOOL_LIQUIDACIONES:
                                 total_row = last_data_row + 1
                                 fc = first_data_col
                                 fc_letter = get_column_letter(fc)
-                                fc1_letter = get_column_letter(fc + 1)
-                                ws.merge_cells(f'{fc_letter}{total_row}:{fc1_letter}{total_row}')
+                                fc2_letter = get_column_letter(fc + 2)  # incluye Fecha Pago, Fecha Pres. y Nro Liquidacion
+                                ws.merge_cells(f'{fc_letter}{total_row}:{fc2_letter}{total_row}')
                                 ws[f'{fc_letter}{total_row}'] = "TOTAL"
                                 ws[f'{fc_letter}{total_row}'].font = Font(bold=True, size=11, color='FFFFFF')
                                 ws[f'{fc_letter}{total_row}'].fill = header_fill
                                 ws[f'{fc_letter}{total_row}'].alignment = center_align
                                 ws.cell(row=total_row, column=fc + 1).fill = header_fill
+                                ws.cell(row=total_row, column=fc + 2).fill = header_fill
 
-                                for col_idx in range(fc + 2, last_data_col + 1):
+                                # SUM desde fc+3 en adelante (saltando Fecha Pago, Fecha Pres. y Nro Liquidacion)
+                                for col_idx in range(fc + 3, last_data_col + 1):
                                     cell = ws.cell(row=total_row, column=col_idx)
                                     col_letter = get_column_letter(col_idx)
                                     cell.value = f"=SUM({col_letter}{data_start_row}:{col_letter}{last_data_row})"
