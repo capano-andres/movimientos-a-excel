@@ -370,13 +370,13 @@ st.markdown("""
 
 
 # ─── Selector de herramienta ────────────────────────────────────────────────────────────
-TOOL_MOVIMIENTOS = "Extracción de Movimientos (.txt)"
+TOOL_MOVIMIENTOS = "Listado por fecha TXT Mendez a Excel limpio"
 TOOL_PORTAL_IVA = "Movimientos Portal IVA limpio (.zip)"
 TOOL_SIFERE = "Archivos SIFERE (.txt)"
 TOOL_LIQUIDACIONES = "Liquidaciones Tarjeta FISERV (.pdf)"
 TOOL_DEDUCCIONES = "Limpieza Excel Deducciones IVA/Ganancias"
 TOOL_ARBA = "Archivo Agente de Percepciones ARBA (.txt)"
-TOOL_CRUCE_CONCEPTO = "Cruce (TXT + Excel Sistema)"
+TOOL_CRUCE_CONCEPTO = "Excel Mendez + TXT Mendez"
 
 herramienta = st.selectbox(
     "Seleccioná la herramienta:",
@@ -2125,8 +2125,11 @@ elif herramienta == TOOL_CRUCE_CONCEPTO:
                     # ── Parsear columnas del Excel ──────────────────────────
                     # El Excel tiene: Fecha, TC, Numero, Nombre, Cond, C.U.I.T., ...
                     # Numero tiene formato "PPPPP-NNNNNNNNNN/L" o similar
+                    # Tipos del Excel del sistema (FCE, NCE, NDE) son equivalentes a FC/NC/ND en el TXT
+                    _TC_NORMALIZE = {'FCE': 'FC', 'NCE': 'NC', 'NDE': 'ND'}
+
                     def extraer_key_xls(row):
-                        tc = str(row.get('TC', '')).strip()
+                        tc = _TC_NORMALIZE.get(str(row.get('TC', '')).strip(), str(row.get('TC', '')).strip())
                         numero = str(row.get('Numero', '')).strip()
                         cuit = str(row.get('C.U.I.T.', '')).replace('-', '').replace('.', '').strip()
 

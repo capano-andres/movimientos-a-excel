@@ -90,8 +90,8 @@ RE_MAIN = re.compile(
     r'(FC|NC|ND|TF|TK)\s+'                          # Tipo comprobante
     r'(\d{5}-\d{1,12}[A-Z ]?)\s*'                   # Numero (más flexible para exportación)
     r'(.+?)\s+'                                     # Proveedor (Flexible hasta Cond IVA)
-    r'(Ins\.|Mono|Monot|Exe |Exe\.|C\.F\.|Exp\.|Resp\.)\s+' # Cond IVA
-    r'([\d-]{7,13})?\s+'                            # CUIT/DNI (Opcional)
+    r'(Ins\.|Mono|Monot|Exe |Exe\.|C\.F\.|Exp\.|Resp\.|SNC)\s+' # Cond IVA
+    r'([\d-]{1,13})?\s+'                            # CUIT/DNI (Opcional, incluye "0" para Consumidor Final)
     r'(\d{1,3})\s+'                                 # Concepto
     r'([A-Z])\s+'                                   # Jurisdicción (Letra A-Z)
     r'(.+)$'                                        # Resto (tasa + montos)
