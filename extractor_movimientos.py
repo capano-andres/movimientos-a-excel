@@ -1164,7 +1164,41 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
             # 2. Obtener Jurisdicciones y Conceptos únicos
             unique_jurs = sorted([str(j) for j in df['Jur.'].unique() if pd.notna(j) and str(j).strip()])
             if not unique_jurs: unique_jurs = ["S/D"]
-        
+
+            # Mapeo de código de jurisdicción (letra) → nombre de provincia (Mendez)
+            JUR_NOMBRES = {
+                'A': 'Salta',
+                'B': 'Buenos Aires',
+                'C': 'Capital Federal',
+                'D': 'San Luis',
+                'E': 'Entre Ríos',
+                'F': 'La Rioja',
+                'G': 'Santiago del Estero',
+                'H': 'Chaco',
+                'J': 'San Juan',
+                'K': 'Catamarca',
+                'L': 'La Pampa',
+                'M': 'Mendoza',
+                'N': 'Misiones',
+                'P': 'Formosa',
+                'Q': 'Neuquén',
+                'R': 'Río Negro',
+                'S': 'Santa Fe',
+                'T': 'Tucumán',
+                'U': 'Chubut',
+                'V': 'Tierra del Fuego',
+                'W': 'Corrientes',
+                'X': 'Córdoba',
+                'Y': 'Jujuy',
+                'Z': 'Santa Cruz',
+                '0': 'Exterior',
+            }
+
+            def _jur_label(jur_code: str) -> str:
+                """Devuelve 'X - Nombre Provincia' o solo 'X' si no se reconoce."""
+                nombre = JUR_NOMBRES.get(jur_code.upper())
+                return f"{jur_code} - {nombre}" if nombre else jur_code
+
             conceptos_unicos_df = res_conc[['Concepto', 'Descripcion']].copy()
         
             n_rj_cols = 3 + len(unique_jurs) # Concepto, Desc, Jurs..., Total
@@ -1202,7 +1236,7 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
             ws_rj.cell(row=res_header_row, column=2).value = 'Descripcion'
             for i, jur in enumerate(unique_jurs):
                 cell = ws_rj.cell(row=res_header_row, column=3+i)
-                cell.value = f"Jur {jur}"
+                cell.value = _jur_label(jur)
             ws_rj.cell(row=res_header_row, column=3+len(unique_jurs)).value = 'TOTAL'
         
             for col_idx in range(1, n_rj_cols + 1):
