@@ -353,7 +353,7 @@ def _autofit(ws, n_cols, start_row=6):
         ws.column_dimensions[letter].width = max(max_len + 3, 8)
 
 
-def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumenes=True, con_auxiliar=False, cruce_arca=False, df_arca=None):
+def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumenes=True, con_auxiliar=False, cruce_arca=False, df_arca=None, con_asiento=False):
     """Crea un Excel formateado. Cada tasa de IVA tiene sus propias columnas
     Neto/IVA y cada percepcion/retencion tiene su propia columna.
     output_path puede ser una ruta o un BytesIO buffer."""
@@ -1157,7 +1157,7 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
             ]
             otros_adicionales = [
                 c for c in other_cols 
-                if not any(x in c.upper() for x in ['PERC', 'RET', 'DEDUCC', 'IVA'])
+                if not _es_deduccion(c)
             ]
             cm05_neto_cols += otros_adicionales
         
@@ -1451,6 +1451,133 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
         
             ws5.delete_cols(n_mayor_cols + 1) # Borrar columna auxiliar
             _autofit(ws5, n_mayor_cols)
+
+        # ── Hoja Asiento Contable ────────────────────────────────
+        if con_asiento:
+            # --- Columnas de neto (base imponible) y de IVA ---
+            _as_neto_base_cols = [
+                c for c in IVA_COL_ORDER
+                if c.startswith('Neto') or c in ('Exento', 'Monotributo')
+            ]
+            _as_iva_cols = [c for c in IVA_COL_ORDER if c.startswith('IVA')]
+            _as_deducc_cols  = [c for c in other_cols if _es_deduccion(c)]
+            _as_individ_cols = [c for c in other_cols if not _es_deduccion(c)]
+            _as_all_neto_cols = _as_neto_base_cols + _as_individ_cols
+
+            # --- A. Neto por Concepto ---
+            if _as_all_neto_cols:
+                _conc_grp = df.groupby('Concepto')[_as_all_neto_cols].sum()
+                _conc_grp['_neto'] = _conc_grp.sum(axis=1)
+                _conc_total = _conc_grp[['_neto']].reset_index()
+                _conc_total = _conc_total[_conc_total['_neto'] != 0].copy()
+                _conc_total['Desc'] = _conc_total['Concepto'].apply(
+                    lambda x: CONCEPTOS_MAP.get(str(x), f'Concepto {x}').replace('°', 'o.').upper()
+                )
+                _conc_total['_num'] = pd.to_numeric(_conc_total['Concepto'], errors='coerce')
+                _conc_total = _conc_total.sort_values('_num').drop(columns='_num')
+            else:
+                _conc_total = pd.DataFrame(columns=['Concepto', '_neto', 'Desc'])
+
+            # --- B. IVA total ---
+            _iva_total = float(df[_as_iva_cols].sum().sum()) if _as_iva_cols else 0.0
+
+            # --- C. Deducciones en orden (solo las que tienen valor != 0) ---
+            _deducc_items = []
+            for _c in _as_deducc_cols:
+                _v = float(df[_c].sum())
+                if _v != 0:
+                    _deducc_items.append((_c, _v))
+
+            # --- D. Identificar cuáles deducciones son RET fiscales ---
+            _ret_fiscal_set = {
+                n for n, _ in _deducc_items
+                if 'RET' in n.upper()
+                and 'SIRCREB' not in n.upper()
+                and 'SIRTAC'  not in n.upper()
+            }
+
+            # --- Escribir hoja ---
+            ws_as = writer.book.create_sheet('Asiento Contable')
+
+            # Encabezados de columna en fila 1
+            _as_header_row  = 1
+            _as_data_start  = 2
+            _as_header_labels = ['DESCRIPCIÓN', 'DEBE', 'HABER']
+            _as_col_fills = [
+                header_fill,                              # Descripción → azul
+                PatternFill('solid', fgColor='2F5496'),   # DEBE → azul oscuro
+                PatternFill('solid', fgColor='375623'),   # HABER → verde oscuro
+            ]
+            for _ci, (_h, _hf) in enumerate(zip(_as_header_labels, _as_col_fills), 1):
+                _cell = ws_as.cell(row=_as_header_row, column=_ci)
+                _cell.value = _h
+                _cell.font = header_font; _cell.fill = _hf
+                _cell.alignment = header_align; _cell.border = thin_border
+
+            _curr = _as_data_start
+            _desc_font = Font(bold=True, size=10)
+
+            # ── Filas de Concepto (Neto) ──
+            for _, _rd in _conc_total.iterrows():
+                ws_as.cell(row=_curr, column=1).value = _rd['Desc'] or f"CONCEPTO {_rd['Concepto']}"
+                ws_as.cell(row=_curr, column=1).font = _desc_font
+                _dc = ws_as.cell(row=_curr, column=2)
+                _dc.value = float(_rd['_neto']); _dc.number_format = money_fmt; _dc.alignment = center_align
+                _curr += 1
+
+            # ── Fila IVA ──
+            if _iva_total != 0:
+                ws_as.cell(row=_curr, column=1).value = 'IVA'
+                ws_as.cell(row=_curr, column=1).font = _desc_font
+                _ic = ws_as.cell(row=_curr, column=2)
+                _ic.value = _iva_total; _ic.number_format = money_fmt; _ic.alignment = center_align
+                _curr += 1
+
+            # ── Filas de Deducciones (rastrear filas de RET fiscales) ──
+            _ret_fiscal_rows = []
+            for _dn, _dv in _deducc_items:
+                ws_as.cell(row=_curr, column=1).value = _dn
+                ws_as.cell(row=_curr, column=1).font = _desc_font
+                _dedcc = ws_as.cell(row=_curr, column=2)
+                _dedcc.value = _dv; _dedcc.number_format = money_fmt; _dedcc.alignment = center_align
+                if _dn in _ret_fiscal_set:
+                    _ret_fiscal_rows.append(_curr)
+                _curr += 1
+
+            _last_debe_row = _curr - 1
+
+            # ── a PROVEEDORES (col C) = SUM(DEBE) - DEUDORES ── va primero
+            _prov_row = _curr
+            _pc = ws_as.cell(row=_prov_row, column=1)
+            _pc.value = 'a PROVEEDORES'
+            _pc.font = Font(bold=True, size=11, color='1F3864')
+            _deud_row = _prov_row + 1  # DEUDORES siempre está en la fila siguiente
+            _ph = ws_as.cell(row=_prov_row, column=3)
+            _ph.value = f'=SUM(B{_as_data_start}:B{_last_debe_row})-C{_deud_row}'
+            _ph.number_format = money_fmt; _ph.alignment = center_align
+            _ph.font = Font(bold=True, size=11)
+            _ph.border = Border(top=Side(style='thin'), bottom=Side(style='double'))
+            _curr += 1
+
+            # ── a DEUDORES POR VENTAS (col C) — fórmula de filas B específicas ──
+            _dd = ws_as.cell(row=_deud_row, column=1)
+            _dd.value = 'a DEUDORES POR VENTAS'
+            _dd.font = Font(bold=True, size=11, color='1F3864')
+            _dh = ws_as.cell(row=_deud_row, column=3)
+            if _ret_fiscal_rows:
+                _dh.value = '=' + '+'.join(f'B{r}' for r in _ret_fiscal_rows)
+            else:
+                _dh.value = 0
+            _dh.number_format = money_fmt; _dh.alignment = center_align
+            _dh.font = Font(bold=True, size=11)
+            _dh.border = Border(top=Side(style='thin'), bottom=Side(style='double'))
+
+            _autofit(ws_as, 3, start_row=_as_header_row)
+            ws_as.column_dimensions['A'].width = 38
+            ws_as.column_dimensions['B'].width = 20
+            ws_as.column_dimensions['C'].width = 20
+
+
 
         # ── Hoja ARCA (datos del CSV de ARCA) ──────────────────
         if cruce_arca and df_arca is not None and not df_arca.empty:

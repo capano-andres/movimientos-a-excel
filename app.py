@@ -429,16 +429,18 @@ if herramienta == TOOL_MOVIMIENTOS:
         OPT_AUXILIAR = "Exportar con columna Auxiliar"
         OPT_RESUMENES = "Incluir hojas de resumen"
         OPT_ARCA = "Cruce de comprobantes con ARCA"
+        OPT_ASIENTO = "Asiento Contable"
 
         modo_export = st.radio(
             "Seleccioná el modo de exportación:",
-            options=[OPT_SOLO, OPT_AUXILIAR, OPT_RESUMENES, OPT_ARCA],
+            options=[OPT_SOLO, OPT_AUXILIAR, OPT_RESUMENES, OPT_ARCA, OPT_ASIENTO],
             index=0,
             help="Solo se puede elegir una opción a la vez."
         )
-        con_auxiliar = modo_export == OPT_AUXILIAR
+        con_auxiliar  = modo_export == OPT_AUXILIAR
         con_resumenes = modo_export == OPT_RESUMENES
-        cruce_arca = modo_export == OPT_ARCA
+        cruce_arca    = modo_export == OPT_ARCA
+        con_asiento   = modo_export == OPT_ASIENTO
         st.markdown('</div>', unsafe_allow_html=True)
 
         # ─── Card 02b: Archivo ARCA (condicional) ──────────────────────────────────────
@@ -633,7 +635,8 @@ if herramienta == TOOL_MOVIMIENTOS:
                                         con_resumenes=con_resumenes,
                                         con_auxiliar=con_auxiliar,
                                         cruce_arca=cruce_arca,
-                                        df_arca=df_arca)
+                                        df_arca=df_arca,
+                                        con_asiento=con_asiento)
                             output.seek(0)
 
                         st.success("✓  Proceso completado con éxito")
@@ -668,7 +671,12 @@ if herramienta == TOOL_MOVIMIENTOS:
                             f"{meta.get('periodo', '')}"
                         )
 
-                        excel_filename = "Cruce Compras.xlsx" if cruce_arca else f"{filename}_procesado.xlsx"
+                        if cruce_arca:
+                            excel_filename = "Cruce Compras.xlsx"
+                        elif con_asiento:
+                            excel_filename = f"{filename}_asiento.xlsx"
+                        else:
+                            excel_filename = f"{filename}_procesado.xlsx"
                         st.download_button(
                             label="↓  Descargar Excel",
                             data=output,
