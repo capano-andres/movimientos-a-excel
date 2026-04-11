@@ -377,10 +377,11 @@ TOOL_LIQUIDACIONES = "Liquidaciones Tarjeta FISERV (.pdf)"
 TOOL_DEDUCCIONES = "Limpieza Excel Deducciones IVA/Ganancias"
 TOOL_ARBA = "Archivo Agente de Percepciones ARBA (.txt)"
 TOOL_CRUCE_CONCEPTO = "Excel Mendez + TXT Mendez"
+TOOL_CM05 = "Papeles de Trabajo CM05"
 
 herramienta = st.selectbox(
     "Seleccioná la herramienta:",
-    options=[TOOL_MOVIMIENTOS, TOOL_PORTAL_IVA, TOOL_SIFERE, TOOL_ARBA, TOOL_LIQUIDACIONES, TOOL_DEDUCCIONES, TOOL_CRUCE_CONCEPTO],
+    options=[TOOL_MOVIMIENTOS, TOOL_PORTAL_IVA, TOOL_SIFERE, TOOL_ARBA, TOOL_LIQUIDACIONES, TOOL_DEDUCCIONES, TOOL_CRUCE_CONCEPTO, TOOL_CM05],
     index=0,
 )
 
@@ -2409,3 +2410,443 @@ elif herramienta == TOOL_CRUCE_CONCEPTO:
             SUBÍ AMBOS ARCHIVOS · TXT + EXCEL SISTEMA
         </div>
         """, unsafe_allow_html=True)
+
+elif herramienta == TOOL_CM05:
+    # ───────────────────────────────────────────────────────────────────────────────
+    # HERRAMIENTA: Papeles de Trabajo CM05
+    # Cruce consolidado TXT + Excel Sistema + Resumen x Concepto + Resumen x Jur.
+    # ───────────────────────────────────────────────────────────────────────────────
+
+    # ─── Card 01: TXT ──────────────────────────────────────────────────────────────
+    st.markdown('<div class="card"><div class="card-label">01 · Archivo TXT (Movimientos Mendez)</div>', unsafe_allow_html=True)
+    uploaded_cm05_txt = st.file_uploader(
+        "Arrastrá el TXT de movimientos o hacé click para seleccionarlo",
+        type=["txt", "prn"],
+        label_visibility="visible",
+        key="cm05_txt"
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ─── Card 02: Excel Sistema ─────────────────────────────────────────────────────
+    st.markdown('<div class="card"><div class="card-label">02 · Archivo Excel Sistema (.xls / .xlsx)</div>', unsafe_allow_html=True)
+    uploaded_cm05_xls = st.file_uploader(
+        "Arrastrá el Excel del sistema con las compras o hacé click para seleccionarlo",
+        type=["xls", "xlsx"],
+        label_visibility="visible",
+        key="cm05_xls"
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if uploaded_cm05_txt and uploaded_cm05_xls:
+        st.success(
+            f"**{uploaded_cm05_txt.name}** + **{uploaded_cm05_xls.name}** listos para procesar"
+        )
+
+        st.markdown('<div class="card"><div class="card-label">03 · Procesar</div>', unsafe_allow_html=True)
+
+        if st.button("⬡  Generar Papeles de Trabajo CM05"):
+            try:
+                # ── 1. Parsear TXT ─────────────────────────────────────────────
+                with st.spinner("Parseando TXT..."):
+                    txt_content_cm05 = uploaded_cm05_txt.getvalue().decode("latin-1", errors="replace")
+                    transacciones_cm05, meta_cm05 = parsear_archivo(content=txt_content_cm05)
+
+                if not transacciones_cm05:
+                    st.error("No se encontraron transacciones en el TXT. Verificá el formato del archivo.")
+                else:
+                    # ── 2. Leer Excel Sistema (primera hoja para el cruce) ──────
+                    with st.spinner("Leyendo Excel Sistema..."):
+                        df_xls_cm05 = pd.read_excel(
+                            io.BytesIO(uploaded_cm05_xls.getvalue()),
+                            sheet_name=0
+                        )
+
+                        # Limpiar: quitar filas vacías y totales
+                        df_xls_cm05 = df_xls_cm05.dropna(how='all')
+                        for col_check in ['Fecha', 'Cond']:
+                            if col_check in df_xls_cm05.columns:
+                                df_xls_cm05 = df_xls_cm05[
+                                    ~df_xls_cm05[col_check].astype(str).str.upper().str.contains('TOTAL', na=False)
+                                ]
+                        if 'Nombre' in df_xls_cm05.columns:
+                            df_xls_cm05 = df_xls_cm05[
+                                ~df_xls_cm05['Nombre'].astype(str).str.strip().str.upper().str.match(
+                                    r'^TOTALE?S?\s*$|^TOTAL\s+GENERAL', na=False
+                                )
+                            ]
+                        df_xls_cm05 = df_xls_cm05.reset_index(drop=True)
+
+                    # ── 3. Construir lookup de Concepto/Letra desde TXT ─────────
+                    with st.spinner("Cruzando datos..."):
+                        _TC_NORM_CM05 = {'FCE': 'FC', 'NCE': 'NC', 'NDE': 'ND'}
+
+                        concepto_lookup_cm05 = {}
+                        fecha_from_xls_cm05 = {}
+
+                        for t in transacciones_cm05:
+                            numero_raw = t['Numero']
+                            pv_txt = numero_raw.split('-')[0] if '-' in numero_raw else numero_raw[:5]
+                            resto_num = numero_raw.split('-')[1] if '-' in numero_raw else numero_raw[5:]
+                            nro_txt = resto_num[:-1] if resto_num and resto_num[-1].isalpha() else resto_num
+                            cuit_txt = t['CUIT'].replace('-', '')
+                            try:
+                                pv_norm = str(int(pv_txt))
+                            except ValueError:
+                                pv_norm = pv_txt
+                            try:
+                                nro_norm = str(int(nro_txt))
+                            except ValueError:
+                                nro_norm = nro_txt
+                            key = f"{t['Tipo']}|{pv_norm}|{nro_norm}|{cuit_txt}"
+                            concepto_lookup_cm05[key] = (t['Concepto'], t['Letra'])
+
+                        def extraer_key_cm05(row):
+                            tc = _TC_NORM_CM05.get(str(row.get('TC', '')).strip(), str(row.get('TC', '')).strip())
+                            numero = str(row.get('Numero', '')).strip()
+                            cuit = str(row.get('C.U.I.T.', '')).replace('-', '').replace('.', '').strip()
+                            if '-' in numero:
+                                parts = numero.split('-', 1)
+                                pv_raw, nro_raw = parts[0], parts[1]
+                            elif '/' in numero:
+                                parts = numero.split('/', 1)
+                                pv_raw, nro_raw = parts[0], parts[1]
+                            else:
+                                pv_raw = numero[:5] if len(numero) >= 5 else numero
+                                nro_raw = numero[5:] if len(numero) > 5 else ''
+                            nro_clean = re.sub(r'[/A-Za-z]+$', '', nro_raw).strip()
+                            try:
+                                pv_norm = str(int(pv_raw))
+                            except ValueError:
+                                pv_norm = pv_raw
+                            try:
+                                nro_norm = str(int(nro_clean))
+                            except ValueError:
+                                nro_norm = nro_clean
+                            return f"{tc}|{pv_norm}|{nro_norm}|{cuit}"
+
+                        # Filas cabecera (tienen Fecha)
+                        mask_header_cm05 = df_xls_cm05['Fecha'].notna() & (df_xls_cm05['Fecha'] != '') \
+                            if 'Fecha' in df_xls_cm05.columns else pd.Series([True] * len(df_xls_cm05))
+
+                        matched_cm05 = 0
+                        last_concepto_cm05 = ''
+                        last_jur_cm05 = ''
+                        conceptos_cod_cm05 = []
+                        jurisdicciones_cm05 = []
+
+                        for idx, row in df_xls_cm05.iterrows():
+                            if mask_header_cm05.iloc[idx]:
+                                key = extraer_key_cm05(row)
+                                result = concepto_lookup_cm05.get(key)
+                                if result is not None:
+                                    matched_cm05 += 1
+                                    last_concepto_cm05, last_jur_cm05 = result
+                                    fecha_from_xls_cm05[key] = str(row.get('Fecha', '')).strip()
+                                else:
+                                    last_concepto_cm05 = ''
+                                    last_jur_cm05 = ''
+                                conceptos_cod_cm05.append(last_concepto_cm05)
+                                jurisdicciones_cm05.append(last_jur_cm05)
+                            else:
+                                conceptos_cod_cm05.append(last_concepto_cm05)
+                                jurisdicciones_cm05.append(last_jur_cm05)
+
+                        # Enriquecer transacciones con fecha del Excel
+                        for t in transacciones_cm05:
+                            numero_raw = t['Numero']
+                            pv_txt = numero_raw.split('-')[0] if '-' in numero_raw else numero_raw[:5]
+                            resto_num = numero_raw.split('-')[1] if '-' in numero_raw else numero_raw[5:]
+                            nro_txt = resto_num[:-1] if resto_num and resto_num[-1].isalpha() else resto_num
+                            cuit_txt = t['CUIT'].replace('-', '')
+                            try:
+                                pv_n = str(int(pv_txt))
+                            except ValueError:
+                                pv_n = pv_txt
+                            try:
+                                nro_n = str(int(nro_txt))
+                            except ValueError:
+                                nro_n = nro_txt
+                            tkey = f"{t['Tipo']}|{pv_n}|{nro_n}|{cuit_txt}"
+                            if tkey in fecha_from_xls_cm05:
+                                t['Fecha'] = fecha_from_xls_cm05[tkey]
+
+                    # ── 4. Generar Excel consolidado con resumenes via crear_excel ─
+                    with st.spinner("Generando Excel de Papeles de Trabajo CM05..."):
+                        output_cm05_raw = io.BytesIO()
+                        crear_excel(
+                            transacciones_cm05,
+                            meta_cm05,
+                            output_cm05_raw,
+                            con_resumenes=True,
+                            con_auxiliar=False,
+                            cruce_arca=False,
+                            df_arca=None,
+                            con_asiento=False,
+                        )
+                        output_cm05_raw.seek(0)
+
+                        # ── Filtrar: mantener solo las 3 hojas necesarias ────────
+                        from openpyxl import load_workbook
+                        HOJAS_CM05 = {"Movimientos", "Resumen x Concepto", "Resumen x Concepto y Jur."}
+                        wb_cm05 = load_workbook(output_cm05_raw)
+                        for titulo in [ws.title for ws in wb_cm05.worksheets]:
+                            if titulo not in HOJAS_CM05:
+                                del wb_cm05[titulo]
+
+                        # ── Post-procesar "Resumen x Concepto" ────────────────────
+                        # Encabezados en fila 6 (startrow=5 en pandas → fila 6 en Excel)
+                        ws_rc_cm05 = wb_cm05["Resumen x Concepto"]
+                        HDR_ROW_CM05 = 6
+                        DATA_START_CM05 = HDR_ROW_CM05 + 1
+                        last_row_cm05 = ws_rc_cm05.max_row
+                        total_row_cm05 = last_row_cm05  # la última fila es TOTAL GENERAL
+
+                        # Columnas fijas que NO se reclasifican
+                        # (no incluimos 'cantidad' aquí para que pase al elif)
+                        SKIP_NAMES_CM05 = {'concepto', 'descripcion', 'deducciones', 'total'}
+
+                        # Mapear número de columna → nombre de header
+                        col_hdr_cm05 = {}
+                        for cell in ws_rc_cm05[HDR_ROW_CM05]:
+                            if cell.value is not None:
+                                col_hdr_cm05[cell.column] = str(cell.value)
+
+                        # ── Clasificar columnas ───────────────────────────────────
+                        iva_cols_cm05  = []   # IVA*
+                        cant_cols_cm05 = []   # Cantidad → eliminar
+                        neto_cols_cm05 = []   # Neto* / Exento / Monotributo → Neto
+                        otro_cols_cm05 = []   # Otros impuestos → también van a Neto
+
+                        for col_n, hdr in col_hdr_cm05.items():
+                            hl = hdr.lower()
+                            hu = hdr.upper()
+                            if hl in SKIP_NAMES_CM05:
+                                continue
+                            elif hl == 'cantidad':
+                                cant_cols_cm05.append(col_n)
+                            elif hl.startswith('iva'):
+                                iva_cols_cm05.append(col_n)
+                            elif any(k in hu for k in ('PERC', 'RET.', 'SIRCREB')):
+                                pass  # deducciones: no se tocan
+                            elif any(k in hl for k in ('neto', 'exento', 'monotributo')):
+                                neto_cols_cm05.append(col_n)
+                            else:
+                                # Otros impuestos (IMP.CIG, IMP.SELLO, etc.) → suman al Neto
+                                otro_cols_cm05.append(col_n)
+
+                        # Todos los que van al Neto
+                        all_neto_src = neto_cols_cm05 + otro_cols_cm05
+
+                        def _combinar_formula(ws, row_i, cols):
+                            """
+                            Construye '=part1+part2+...' combinando
+                            fórmulas (string) y valores numéricos de varias celdas.
+                            """
+                            parts = []
+                            for c in cols:
+                                v = ws.cell(row=row_i, column=c).value
+                                if v is None:
+                                    continue
+                                elif isinstance(v, str) and v.startswith('='):
+                                    parts.append(v[1:])   # quitar el '='
+                                elif isinstance(v, (int, float)):
+                                    parts.append(str(v))
+                            return ('=' + '+'.join(parts)) if parts else 0
+
+                        from openpyxl.utils import get_column_letter as _gcl
+
+                        # ── Neto: combinar fórmulas en primera col Neto ───────────
+                        neto_dest_col = all_neto_src[0] if all_neto_src else None
+                        if neto_dest_col:
+                            ws_rc_cm05.cell(row=HDR_ROW_CM05, column=neto_dest_col).value = "Neto"
+                            fmt_neto = ws_rc_cm05.cell(row=DATA_START_CM05, column=neto_dest_col).number_format
+                            for row_i in range(DATA_START_CM05, total_row_cm05):  # excluye TOTAL
+                                cell = ws_rc_cm05.cell(row=row_i, column=neto_dest_col)
+                                cell.value = _combinar_formula(ws_rc_cm05, row_i, all_neto_src)
+                                if fmt_neto:
+                                    cell.number_format = fmt_neto
+
+                        # ── IVA: combinar fórmulas en primera col IVA ─────────────
+                        iva_dest_col = iva_cols_cm05[0] if iva_cols_cm05 else None
+                        if iva_dest_col:
+                            ws_rc_cm05.cell(row=HDR_ROW_CM05, column=iva_dest_col).value = "IVA"
+                            fmt_iva = ws_rc_cm05.cell(row=DATA_START_CM05, column=iva_dest_col).number_format
+                            for row_i in range(DATA_START_CM05, total_row_cm05):
+                                cell = ws_rc_cm05.cell(row=row_i, column=iva_dest_col)
+                                cell.value = _combinar_formula(ws_rc_cm05, row_i, iva_cols_cm05)
+                                if fmt_iva:
+                                    cell.number_format = fmt_iva
+
+                        # ── Eliminar columnas sobrantes (de mayor a menor) ────────
+                        cols_to_del_cm05 = sorted(
+                            all_neto_src[1:]    # neto + otros sobrantes
+                            + iva_cols_cm05[1:] # iva sobrantes
+                            + cant_cols_cm05,   # Cantidad
+                            reverse=True
+                        )
+                        for col_del in cols_to_del_cm05:
+                            ws_rc_cm05.delete_cols(col_del)
+                        # ── Corregir encabezados combinados tras el borrado ───────
+                        # openpyxl no ajusta los merged ranges al borrar columnas;
+                        # hay que deshacer todos y volver a combinar con el nuevo ancho.
+                        new_max_col = ws_rc_cm05.max_column
+                        new_last_col_l = _gcl(new_max_col)
+
+                        # Disolver todos los merges actuales (iteramos sobre copia)
+                        for mr in list(ws_rc_cm05.merged_cells.ranges):
+                            try:
+                                ws_rc_cm05.unmerge_cells(str(mr))
+                            except KeyError:
+                                # La celda ya fue borrada por delete_cols;
+                                # el range ya fue removido del tracking → ignorar
+                                pass
+
+                        # Re-combinar filas de título (1–4) con el nuevo ancho
+                        for title_row in range(1, HDR_ROW_CM05):  # filas 1,2,3,4,5
+                            ws_rc_cm05.merge_cells(f"A{title_row}:{new_last_col_l}{title_row}")
+
+                        # ── Reescribir fórmulas TOTAL GENERAL tras el borrado ─────
+                        # (openpyxl NO actualiza referencias al borrar columnas)
+                        new_col_hdr = {}
+                        for cell in ws_rc_cm05[HDR_ROW_CM05]:
+                            if cell.value is not None:
+                                new_col_hdr[str(cell.value).lower()] = cell.column
+
+                        money_fmt_rc = "#,##0.00"
+                        n_new_cols = ws_rc_cm05.max_column
+
+                        # Reescribir fila TOTAL (SUM de cada columna numérica)
+                        for col_i in range(1, n_new_cols + 1):
+                            hdr_v = ws_rc_cm05.cell(row=HDR_ROW_CM05, column=col_i).value
+                            if hdr_v is None:
+                                continue
+                            hl2 = str(hdr_v).lower()
+                            if hl2 in ('concepto', 'descripcion'):
+                                continue  # texto, no se suma
+                            col_l = _gcl(col_i)
+                            tc = ws_rc_cm05.cell(row=total_row_cm05, column=col_i)
+                            tc.value = f"=SUM({col_l}{DATA_START_CM05}:{col_l}{total_row_cm05 - 1})"
+                            tc.number_format = money_fmt_rc
+
+                        # Reescribir "Total" de cada fila de datos para que sume Neto+IVA+Deducciones
+                        total_col_new = new_col_hdr.get('total')
+                        neto_col_new  = new_col_hdr.get('neto')
+                        iva_col_new   = new_col_hdr.get('iva')
+                        ded_col_new   = new_col_hdr.get('deducciones')
+
+                        if total_col_new and neto_col_new and ded_col_new:
+                            total_col_l = _gcl(total_col_new)
+                            neto_col_l  = _gcl(neto_col_new)
+                            iva_col_l   = _gcl(iva_col_new) if iva_col_new else None
+                            ded_col_l   = _gcl(ded_col_new)
+                            for row_i in range(DATA_START_CM05, total_row_cm05):
+                                if iva_col_l:
+                                    formula = f"={neto_col_l}{row_i}+{iva_col_l}{row_i}+{ded_col_l}{row_i}"
+                                else:
+                                    formula = f"={neto_col_l}{row_i}+{ded_col_l}{row_i}"
+                                cell = ws_rc_cm05.cell(row=row_i, column=total_col_new)
+                                cell.value = formula
+                                cell.number_format = money_fmt_rc
+
+                        output_cm05 = io.BytesIO()
+                        wb_cm05.save(output_cm05)
+                        output_cm05.seek(0)
+
+
+
+
+                    st.success("✓  Papeles de Trabajo CM05 generados con éxito")
+
+                    from collections import Counter
+                    tipos_cm05 = Counter(t.get("Tipo", "") for t in transacciones_cm05)
+                    total_xls_rows = mask_header_cm05.sum()
+                    not_found_cm05 = total_xls_rows - matched_cm05
+
+                    st.markdown(f"""
+                    <div class="stats-row">
+                        <div class="stat-chip">
+                            <span class="stat-val">{len(transacciones_cm05)}</span>
+                            <span class="stat-lbl">Total TXT</span>
+                        </div>
+                        <div class="stat-chip">
+                            <span class="stat-val">{matched_cm05}</span>
+                            <span class="stat-lbl">Matcheados</span>
+                        </div>
+                        <div class="stat-chip">
+                            <span class="stat-val">{not_found_cm05}</span>
+                            <span class="stat-lbl">No encontrados</span>
+                        </div>
+                        <div class="stat-chip">
+                            <span class="stat-val">{tipos_cm05.get('FC', 0)}</span>
+                            <span class="stat-lbl">Facturas</span>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    if not_found_cm05 > 0:
+                        st.warning(f"**{not_found_cm05}** comprobantes del Excel no fueron encontrados en el TXT")
+
+                    st.info(
+                        f"**{meta_cm05.get('tipo_reporte', 'N/A')}** · "
+                        f"{meta_cm05.get('razon_social', 'Contribuyente')} · "
+                        f"{meta_cm05.get('periodo', '')}"
+                    )
+
+                    cm05_filename = f"{Path(uploaded_cm05_txt.name).stem}_CM05.xlsx"
+                    st.download_button(
+                        label="↓  Descargar Papeles de Trabajo CM05",
+                        data=output_cm05,
+                        file_name=cm05_filename,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                    )
+
+
+            except Exception as e:
+                st.error(f"Error al procesar: {str(e)}")
+                st.exception(e)
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    elif uploaded_cm05_txt and not uploaded_cm05_xls:
+        st.markdown("""
+        <div style="
+            text-align: center;
+            padding: 2rem 1rem;
+            font-family: 'Space Mono', monospace;
+            font-size: 0.72rem;
+            color: #6b7280;
+            letter-spacing: 0.12em;
+        ">
+            FALTA EL EXCEL SISTEMA · SUBILO EN EL PASO 02
+        </div>
+        """, unsafe_allow_html=True)
+
+    elif not uploaded_cm05_txt and uploaded_cm05_xls:
+        st.markdown("""
+        <div style="
+            text-align: center;
+            padding: 2rem 1rem;
+            font-family: 'Space Mono', monospace;
+            font-size: 0.72rem;
+            color: #6b7280;
+            letter-spacing: 0.12em;
+        ">
+            FALTA EL TXT · SUBILO EN EL PASO 01
+        </div>
+        """, unsafe_allow_html=True)
+
+    else:
+        st.markdown("""
+        <div style="
+            text-align: center;
+            padding: 2rem 1rem;
+            font-family: 'Space Mono', monospace;
+            font-size: 0.72rem;
+            color: #6b7280;
+            letter-spacing: 0.12em;
+        ">
+            SUBÍ EL TXT Y EL EXCEL SISTEMA · PASOS 01 Y 02
+        </div>
+        """, unsafe_allow_html=True)
+
