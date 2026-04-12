@@ -3005,9 +3005,8 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
         periodo_estrategia = st.selectbox("Frecuencia:", ["Mensual", "Varios Periodos"], index=0)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    if organismo in ["IVA"]:
-        st.info(f"🚧 El cruce de deducciones para **{organismo}** se encuentra en desarrollo activo.")
-        st.stop()
+    if organismo == "IVA":
+        pass  # Funcionalidad IVA activa
 
     if periodo_estrategia == "Varios Periodos":
         st.info("🚧 El cruce para **Varios Períodos** simultáneos se encuentra en desarrollo. Temporalmente usá el modo Mensual.")
@@ -3095,6 +3094,83 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                 'pv':          pv_norm,
                 'pv_norm':     pv_norm,
                 'nro':         nro_norm,
+                'nro_norm':    nro_norm,
+                'tipo_comp':   tipo_c.strip(),
+                'monto':       monto_f,
+                'razon_social': rz
+            }
+            
+            if seccion == "P":
+                percepciones.append(registro)
+            else:
+                retenciones.append(registro)
+                
+        return {'percepciones': percepciones, 'retenciones': retenciones}
+
+    # ── Función de parsing de IVA ──────────────────────────────────────────────────
+    def parsear_iva_xls(iva_content: bytes) -> dict:
+        import pandas as pd
+        import io
+        
+        df = pd.read_excel(io.BytesIO(iva_content))
+        
+        percepciones = []
+        retenciones = []
+        
+        cols_map = {}
+        for c in df.columns:
+            c_low = str(c).lower().strip()
+            if 'cuit' in c_low: cols_map['cuit'] = c
+            elif 'fecha' in c_low and 'comprobante' in c_low: cols_map['fecha'] = c
+            elif 'n' in c_low and 'comprobante' in c_low: cols_map['nro'] = c
+            elif 'tipo' in c_low and 'comprobante' in c_low: cols_map['tipo_comp'] = c 
+            elif 'importe' in c_low: cols_map['monto'] = c 
+            elif 'razon social' in c_low or 'denominaci' in c_low: cols_map['razon_social'] = c
+            elif 'operaci' in c_low: cols_map['operacion'] = c
+            
+        for idx, row in df.iterrows():
+            cuit_raw = str(row.get(cols_map.get('cuit', 'CUIT'), ''))
+            cuit_limpio = cuit_raw.replace('-', '').replace('.0', '').strip()
+            if not cuit_limpio or cuit_limpio == 'nan':
+                continue
+                
+            if len(cuit_limpio) == 11 and '-' not in cuit_raw:
+                cuit_raw = f"{cuit_limpio[:2]}-{cuit_limpio[2:10]}-{cuit_limpio[10]}"
+            
+            monto_val = row.get(cols_map.get('monto', 'Importe'), 0)
+            if isinstance(monto_val, str):
+                monto_val = monto_val.replace('.', '').replace(',', '.') if ',' in monto_val else monto_val
+            monto_f = float(monto_val or 0)
+            
+            op_raw = str(row.get(cols_map.get('operacion', 'Operacion'), 'PERCEPCION'))
+            seccion = "R" if 'reten' in op_raw.lower() else "P"
+            
+            rz = str(row.get(cols_map.get('razon_social', 'Razon Social'), ''))
+            fecha_s = str(row.get(cols_map.get('fecha', 'Fecha'), ''))
+            
+            nro_m = str(row.get(cols_map.get('nro', 'Nro'), ''))
+            tipo_c = str(row.get(cols_map.get('tipo_comp', 'Tipo'), ''))
+            
+            pv_norm = "0"
+            nro_norm = nro_m.strip()
+            try:
+                if '-' in nro_norm:
+                    pv_norm = str(int(nro_norm.split('-')[0]))
+                    nro_norm = str(int(nro_norm.split('-')[1]))
+                else:
+                    nro_norm = str(int(float(nro_norm)))
+            except ValueError:
+                pass
+                
+            registro = {
+                'tipo_reg':    seccion,
+                'cod_jur':     '00000',
+                'cuit':        cuit_raw,
+                'cuit_limpio': cuit_limpio,
+                'fecha':       fecha_s,
+                'pv':          pv_norm,
+                'pv_norm':     pv_norm,
+                'nro':         nro_m,
                 'nro_norm':    nro_norm,
                 'tipo_comp':   tipo_c.strip(),
                 'monto':       monto_f,
@@ -3284,6 +3360,9 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                         elif organismo == "AGIP":
                             agip_content = uploaded_arba_txt_arba.getvalue()
                             arba_data    = parsear_agip_iibb(agip_content)
+                        elif organismo == "IVA":
+                            iva_content = uploaded_arba_txt_arba.getvalue()
+                            arba_data    = parsear_iva_xls(iva_content)
 
                     percepciones = arba_data['percepciones']
                     retenciones  = arba_data['retenciones']
@@ -3293,23 +3372,35 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                         label_tipo = "Percepciones"
                         if organismo == "AGIP":
                             kw_mendez = ("CAP. FED.", "CAP", "FED", "CABA", "AGIP")
+                            excl_mendez = ("ADUA", "I.V.A", "IVA", "GCIAS")
+                        elif organismo == "IVA":
+                            kw_mendez = ("IVA", "I.V.A", "AGREGADO")
+                            excl_mendez = ("ADUA", "GCIAS")
                         else:
                             kw_mendez = ("BS.AS", "BSAS", "BS AS", "BUENOS AIRES")
-                        excl_mendez = ("ADUA", "I.V.A", "IVA", "GCIAS")
+                            excl_mendez = ("ADUA", "I.V.A", "IVA", "GCIAS")
                     elif tipo_default_arba == "R":
                         label_tipo = "Retenciones"
                         if organismo == "AGIP":
                             kw_mendez = ("CAP. FED.", "CAP", "FED", "CABA", "AGIP")
+                            excl_mendez = ("SIRCREB", "SIRTAC", "BCO", "GCIAS", "IVA", "BANCO", "BANCAR")
+                        elif organismo == "IVA":
+                            kw_mendez = ("IVA", "I.V.A", "AGREGADO")
+                            excl_mendez = ("SIRCREB", "SIRTAC", "BCO", "GCIAS", "BANCO", "BANCAR")
                         else:
                             kw_mendez = ("BS.AS", "BSAS", "BS AS", "BUENOS AIRES")
-                        excl_mendez = ("SIRCREB", "SIRTAC", "BCO", "GCIAS", "IVA", "BANCO", "BANCAR")
+                            excl_mendez = ("SIRCREB", "SIRTAC", "BCO", "GCIAS", "IVA", "BANCO", "BANCAR")
                     else:
                         label_tipo = "Percepciones + Retenciones"
                         if organismo == "AGIP":
                             kw_mendez = ("CAP. FED.", "CAP", "FED", "CABA", "AGIP")
+                            excl_mendez = ("ADUA", "I.V.A", "IVA", "GCIAS", "SIRCREB", "SIRTAC", "BCO", "BANCO")
+                        elif organismo == "IVA":
+                            kw_mendez = ("IVA", "I.V.A", "AGREGADO")
+                            excl_mendez = ("ADUA", "GCIAS", "SIRCREB", "SIRTAC", "BCO", "BANCO")
                         else:
                             kw_mendez = ("BS.AS", "BSAS", "BS AS", "BUENOS AIRES")
-                        excl_mendez = ("ADUA", "I.V.A", "IVA", "GCIAS", "SIRCREB", "SIRTAC", "BCO", "BANCO")
+                            excl_mendez = ("ADUA", "I.V.A", "IVA", "GCIAS", "SIRCREB", "SIRTAC", "BCO", "BANCO")
 
                     if not registros_activos:
                         st.warning(f"El TXT ARBA no contiene registros. Verificá el contenido del archivo.")
