@@ -4,6 +4,7 @@ import re
 import zipfile
 import hashlib
 import pandas as pd
+import openpyxl
 import PyPDF2
 from pathlib import Path
 from openpyxl.styles import Border, Side, Font, PatternFill, Alignment
@@ -3004,7 +3005,7 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
         periodo_estrategia = st.selectbox("Frecuencia:", ["Mensual", "Varios Periodos"], index=0)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    if organismo in ["AGIP", "IVA"]:
+    if organismo in ["IVA"]:
         st.info(f"🚧 El cruce de deducciones para **{organismo}** se encuentra en desarrollo activo.")
         st.stop()
 
@@ -3012,6 +3013,100 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
         st.info("🚧 El cruce para **Varios Períodos** simultáneos se encuentra en desarrollo. Temporalmente usá el modo Mensual.")
         st.stop()
 
+
+    # ── Función de parsing de AGIP ──────────────────────────────────────────────────
+    def parsear_agip_iibb(agip_content: bytes) -> dict:
+        import pandas as pd
+        import io
+        
+        text = agip_content.decode("latin-1", errors="replace")
+        skip = 1 if text.startswith("sep=") else 0
+        df = pd.read_csv(io.StringIO(text), sep=',', skiprows=skip, index_col=False)
+        
+        percepciones = []
+        retenciones = []
+        
+        cols_map = {}
+        for c in df.columns:
+            c_low = str(c).lower().strip()
+            if 'cuit' in c_low: cols_map['cuit'] = c
+            elif 'fecha comprobante' in c_low or 'fecha retencion' in c_low or 'fecha percepcion' in c_low:
+                if 'fecha' not in cols_map: cols_map['fecha'] = c
+            elif 'n' in c_low and 'comprobante' in c_low and 'tipo' not in c_low: cols_map['nro'] = c
+            elif 'tipo' in c_low and 'comprobante' in c_low: cols_map['tipo_comp'] = c
+            elif 'monto percibido' in c_low: cols_map['monto_p'] = c
+            elif 'monto retenido' in c_low: cols_map['monto_r'] = c
+            elif 'razon social' in c_low: cols_map['razon_social'] = c
+            
+        if 'fecha' not in cols_map:
+            for c in df.columns:
+                if 'fecha' in str(c).lower().strip(): cols_map['fecha'] = c; break
+                
+        for idx, row in df.iterrows():
+            cuit_raw = str(row.get(cols_map.get('cuit', 'CUIT'), ''))
+            cuit_limpio = cuit_raw.replace('-', '').replace('.0', '').strip()
+            if not cuit_limpio or cuit_limpio == 'nan':
+                continue
+                
+            # Formatear el CUIT local para que tenga los guiones estándar: 30-70828643-1
+            if len(cuit_limpio) == 11 and '-' not in cuit_raw:
+                cuit_raw = f"{cuit_limpio[:2]}-{cuit_limpio[2:10]}-{cuit_limpio[10]}"
+            
+            monto_p_val = row.get(cols_map.get('monto_p', 'Monto Percibido'), 0)
+            monto_r_val = row.get(cols_map.get('monto_r', 'Monto Retenido'), 0)
+            
+            # Limpiar por las dudas si entra como object string
+            if isinstance(monto_p_val, str):
+                monto_p_val = monto_p_val.replace('.', '').replace(',', '.') if ',' in monto_p_val else monto_p_val
+            if isinstance(monto_r_val, str):
+                monto_r_val = monto_r_val.replace('.', '').replace(',', '.') if ',' in monto_r_val else monto_r_val
+                
+            monto_p = float(monto_p_val or 0)
+            monto_r = float(monto_r_val or 0)
+            rz = str(row.get(cols_map.get('razon_social', 'Razon Social'), ''))
+            
+            if monto_p > 0:
+                seccion = "P"
+                monto_f = monto_p
+            elif monto_r > 0:
+                seccion = "R"
+                monto_f = monto_r
+            else:
+                seccion = "R" if 'monto_r' in cols_map else "P"
+                monto_f = 0.0
+                
+            fecha_s = str(row.get(cols_map.get('fecha', 'Fecha Comprobante'), ''))
+            nro_s = str(row.get(cols_map.get('nro', 'N Comprobante'), ''))
+            tipo_c = str(row.get(cols_map.get('tipo_comp', 'Tipo Comprobante'), ''))
+            
+            pv_norm = "0"
+            nro_norm = nro_s.strip()
+            try:
+                nro_norm = str(int(float(nro_norm.replace(',', ''))))
+            except ValueError:
+                pass
+                
+            registro = {
+                'tipo_reg':    seccion,
+                'cod_jur':     '00000',
+                'cuit':        cuit_raw,
+                'cuit_limpio': cuit_limpio,
+                'fecha':       fecha_s,
+                'pv':          pv_norm,
+                'pv_norm':     pv_norm,
+                'nro':         nro_norm,
+                'nro_norm':    nro_norm,
+                'tipo_comp':   tipo_c.strip(),
+                'monto':       monto_f,
+                'razon_social': rz
+            }
+            
+            if seccion == "P":
+                percepciones.append(registro)
+            else:
+                retenciones.append(registro)
+                
+        return {'percepciones': percepciones, 'retenciones': retenciones}
 
     # ── Función de parsing del TXT ARBA ─────────────────────────────────────────────
     def parsear_arba_iibb(content: str, tipo_default: str = None) -> dict:
@@ -3144,7 +3239,7 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
 
     uploaded_arba_txt_arba = st.file_uploader(
         f"Arrastrá el archivo de {organismo} o hacé click para seleccionarlo",
-        type=["txt", "csv", "xlsx"],
+        type=["txt", "csv", "xlsx", "xls"],
         label_visibility="visible",
         key="cruce_arba_txt_arba"
     )
@@ -3181,10 +3276,14 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                 if not transacciones_arba:
                     st.error("No se encontraron transacciones en el TXT Mendez. Verificá el formato.")
                 else:
-                    # ── 2. Parsear TXT ARBA ──────────────────────────────────────────
-                    with st.spinner("Parseando TXT ARBA..."):
-                        arba_content = uploaded_arba_txt_arba.getvalue().decode("latin-1", errors="replace")
-                        arba_data    = parsear_arba_iibb(arba_content, tipo_default=tipo_default_arba)
+                    # ── 2. Parsear Archivo de Organismo ───────────────────────────────────
+                    with st.spinner(f"Parseando archivo de {organismo}..."):
+                        if organismo == "ARBA":
+                            arba_content = uploaded_arba_txt_arba.getvalue().decode("latin-1", errors="replace")
+                            arba_data    = parsear_arba_iibb(arba_content, tipo_default=tipo_default_arba)
+                        elif organismo == "AGIP":
+                            agip_content = uploaded_arba_txt_arba.getvalue()
+                            arba_data    = parsear_agip_iibb(agip_content)
 
                     percepciones = arba_data['percepciones']
                     retenciones  = arba_data['retenciones']
@@ -3192,15 +3291,24 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
 
                     if tipo_default_arba == "P":
                         label_tipo = "Percepciones"
-                        kw_mendez = ("PERC", "BS.AS", "BSAS", "BS AS", "BUENOS AIRES")
+                        if organismo == "AGIP":
+                            kw_mendez = ("CAP. FED.", "CAP", "FED", "CABA", "AGIP")
+                        else:
+                            kw_mendez = ("BS.AS", "BSAS", "BS AS", "BUENOS AIRES")
                         excl_mendez = ("ADUA", "I.V.A", "IVA", "GCIAS")
                     elif tipo_default_arba == "R":
                         label_tipo = "Retenciones"
-                        kw_mendez = ("RET", "BS.AS", "BSAS", "BS AS", "BUENOS AIRES")
+                        if organismo == "AGIP":
+                            kw_mendez = ("CAP. FED.", "CAP", "FED", "CABA", "AGIP")
+                        else:
+                            kw_mendez = ("BS.AS", "BSAS", "BS AS", "BUENOS AIRES")
                         excl_mendez = ("SIRCREB", "SIRTAC", "BCO", "GCIAS", "IVA", "BANCO", "BANCAR")
                     else:
                         label_tipo = "Percepciones + Retenciones"
-                        kw_mendez = ("PERC", "RET", "BS.AS", "BSAS", "BS AS", "BUENOS AIRES")
+                        if organismo == "AGIP":
+                            kw_mendez = ("CAP. FED.", "CAP", "FED", "CABA", "AGIP")
+                        else:
+                            kw_mendez = ("BS.AS", "BSAS", "BS AS", "BUENOS AIRES")
                         excl_mendez = ("ADUA", "I.V.A", "IVA", "GCIAS", "SIRCREB", "SIRTAC", "BCO", "BANCO")
 
                     if not registros_activos:
@@ -3215,10 +3323,8 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 'Tasa 2.5%', 'Tasa 2,5%', 'T.2.5%', 'T.2,5%',
                                 'T.IMP 21%', 'T.IMP 10%', 'Exento', 'R.Monot21', 'R.Mont.10',
                             }
-                            KEYWORDS_BSAS = ("BS.AS", "BSAS", "BS AS", "BUENOS AIRES")
-
                             def _es_bsas_comp(nombre: str, tipo_reg: str) -> bool:
-                                """Filtra sub-conceptos de Mendez que sean IIBB Bs.As."""
+                                """Filtra sub-conceptos de Mendez que sean del Organismo actual."""
                                 if not nombre or nombre in IVA_RATES_SET:
                                     return False
                                 nu = nombre.upper()
@@ -3230,12 +3336,11 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 if tipo_reg is None:
                                     if "PERC" not in nu and "RET" not in nu:
                                         return False
-                                # Debe ser de Bs.As.
-                                if not any(kw in nu for kw in KEYWORDS_BSAS):
+                                # Debe contener la keyword del organismo
+                                if not any(kw in nu for kw in kw_mendez):
                                     return False
                                 # Excluir no deseados
-                                excl = ("ADUA", "I.V.A", "IVA", "GCIAS", "SIRCREB", "SIRTAC", "BCO", "BANCO")
-                                if any(x in nu for x in excl):
+                                if any(x in nu for x in excl_mendez):
                                     return False
                                 return True
 
@@ -3327,9 +3432,15 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 if ck and ck not in cuit_proveedor:
                                     cuit_proveedor[ck] = t.get('Proveedor', '')
 
-                            # Buscar en CuitOnline los CUITs de ARBA que no están en Mendez
+                            # Integrar razon social de AGIP o si está disponible en padrón
+                            for r in registros_activos:
+                                ck = r['cuit_limpio']
+                                if ck not in cuit_proveedor and r.get('razon_social'):
+                                    cuit_proveedor[ck] = r['razon_social'] + f" ({organismo})"
+
+                            # Buscar en CuitOnline los CUITs que no están en Mendez ni en el Padrón
                             cuits_faltantes = [ck for ck in arba_por_cuit.keys() if ck not in cuit_proveedor]
-                            if cuits_faltantes:
+                            if cuits_faltantes and organismo == "ARBA":
                                 prog_text = f"Buscando {len(cuits_faltantes)} proveedores en CuitOnline..."
                                 progress_bar = st.progress(0, text=prog_text)
                                 for idx_cf, ck in enumerate(cuits_faltantes):
@@ -3340,6 +3451,9 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                         cuit_proveedor[ck] = "⚠ SIN PROVEEDOR"
                                     progress_bar.progress((idx_cf + 1) / len(cuits_faltantes), text=prog_text)
                                 progress_bar.empty()
+                            elif cuits_faltantes:
+                                for ck in cuits_faltantes:
+                                    cuit_proveedor[ck] = "⚠ SIN PROVEEDOR"
 
                             filas_cruce = []
                             for ck in sorted(all_cuits):
@@ -3360,9 +3474,9 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 filas_cruce.append({
                                     'CUIT': cuit_fmt,
                                     'Proveedor': cuit_proveedor.get(ck, ''),
-                                    f'Total ARBA ({label_tipo})': round(m_arba, 2),
+                                    f'Total {organismo} ({label_tipo})': round(m_arba, 2),
                                     'Total Mendez': round(m_mendez, 2),
-                                    'Diferencia (ARBA - Mendez)': diff,
+                                    f'Diferencia ({organismo} - Mendez)': diff,
                                     'Estado': estado,
                                 })
 
@@ -3379,8 +3493,6 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 for r in lista_dicts:
                                     cuit = r.get('CUIT', '')
                                     prov = r.get('Proveedor', '')
-                                    if prov and "SIN PROVEEDOR" not in prov:
-                                        last_prov = prov
 
                                     if last_cuit is not None and cuit != last_cuit:
                                         sub = {k: '' for k in lista_dicts[0].keys()}
@@ -3389,6 +3501,8 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                         sub[col_monto] = run_sum
                                         filas_out.append(sub)
                                         run_sum = 0.0
+                                        
+                                    if prov and "SIN PROVEEDOR" not in prov:
                                         last_prov = prov
                                     
                                     last_cuit = cuit
@@ -3433,7 +3547,7 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                     for t in t_arb:
                                         t_copy = t.copy()
                                         t_copy['CUIT'] = cuit_fmt
-                                        t_copy['Origen'] = 'ARBA'
+                                        t_copy['Origen'] = f'{organismo}'
                                         lista_dif.append(t_copy)
                                     for t in t_men:
                                         t_copy = t.copy()
@@ -3499,6 +3613,7 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                         # ── 5. Generar Excel de 3 hojas ──────────────────────────────
                         with st.spinner("Generando Excel..."):
                             from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+                            from openpyxl.formatting.rule import CellIsRule, FormulaRule
                             from openpyxl.utils import get_column_letter
 
                             output_cruce = io.BytesIO()
@@ -3570,9 +3685,9 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 CRUCE_HEADERS = [
                                     'CUIT',
                                     'Proveedor',
-                                    f'Total ARBA ({label_tipo})',
+                                    f'Total {organismo} ({label_tipo})',
                                     'Total Mendez',
-                                    'Diferencia (ARBA - Mendez)',
+                                    f'Diferencia ({organismo} - Mendez)',
                                     'Estado',
                                 ]
                                 n1 = len(CRUCE_HEADERS)
@@ -3581,7 +3696,7 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
 
                                 ws1 = writer.book.create_sheet('Cruce x CUIT', 0)
                                 _encabezado(ws1, n1,
-                                    f'CRUCE ARBA · {label_tipo.upper()}',
+                                    f'CRUCE {organismo} · {label_tipo.upper()}',
                                     f'CUIT: {meta_arba.get("cuit_empresa","")} | {periodo} | {len(all_cuits)} CUITs'
                                 )
                                 ws1.row_dimensions[4].height = 4
@@ -3600,14 +3715,14 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                     # B: Proveedor → VLOOKUP desde Detalle Mendez, fallback Detalle ARBA
                                     ws1.cell(row_i, 2).value = (
                                         f"=IFERROR(VLOOKUP(A{row_i},'Detalle Mendez'!$A$6:$B${last_men_row},2,0),"
-                                        f"IFERROR(VLOOKUP(A{row_i},'Detalle ARBA'!$A$6:$B${last_arba_row},2,0),\"\"))"
+                                        f"IFERROR(VLOOKUP(A{row_i},'Detalle {organismo}'!$A$6:$B${last_arba_row},2,0),\"\"))"
                                     )
 
                                     # C: Total ARBA → SUMIFS Detalle ARBA excluyendo subtotal
                                     ws1.cell(row_i, 3).value = (
-                                        f"=SUMIFS('Detalle ARBA'!$G$6:$G${last_arba_row},"
-                                        f"'Detalle ARBA'!$A$6:$A${last_arba_row},A{row_i},"
-                                        f"'Detalle ARBA'!$B$6:$B${last_arba_row},\"<>*(SUBTOTAL)*\")"
+                                        f"=SUMIFS('Detalle {organismo}'!$G$6:$G${last_arba_row},"
+                                        f"'Detalle {organismo}'!$A$6:$A${last_arba_row},A{row_i},"
+                                        f"'Detalle {organismo}'!$B$6:$B${last_arba_row},\"<>*(SUBTOTAL)*\")"
                                     )
                                     ws1.cell(row_i, 3).number_format = FMT_MONEY
 
@@ -3628,16 +3743,16 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                     ws1.cell(row_i, 6).value = (
                                         f'=IF(E{row_i}=0,"✓ OK",'
                                         f'IF(D{row_i}=0,"⚠ Falta en Mendez",'
-                                        f'IF(C{row_i}=0,"⚠ Falta en ARBA","⚠ Diferencia")))'
+                                        f'IF(C{row_i}=0,"⚠ Falta en {organismo}","⚠ Diferencia")))'
                                     )
 
                                     # Estilar fila según diferencia calculada en Python
                                     m_a = arba_por_cuit.get(ck, 0.0)
                                     m_m = mendez_por_cuit.get(ck, 0.0)
-                                    fill_row = FILL_OK if round(m_a - m_m, 2) == 0.0 else FILL_DIFF
+                                    # Ya no usamos FILL_DIFF estatico, será condicional.
                                     for c in range(1, n1 + 1):
                                         cell = ws1.cell(row_i, c)
-                                        cell.fill = fill_row
+                                        if round(m_a - m_m, 2) == 0.0: cell.fill = FILL_OK
                                         cell.alignment = CTR
                                         cell.border = THIN
 
@@ -3658,6 +3773,22 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 ws1.row_dimensions[tot_row].height = 18
                                 _autofit_ws(ws1, n1)
 
+                                FILL_YELLOW = PatternFill(start_color='FFF2CC', end_color='FFF2CC', fill_type='solid')
+                                FILL_RED    = PatternFill(start_color='FCE4D6', end_color='FCE4D6', fill_type='solid')
+                                FILL_ORANGE = PatternFill(start_color='F8CBAD', end_color='F8CBAD', fill_type='solid')
+
+                                f_dif = FormulaRule(formula=['$F6="⚠ Diferencia"'], stopIfTrue=False, fill=FILL_YELLOW)
+                                f_fal_org = FormulaRule(formula=[f'$F6="⚠ Falta en {organismo}"'], stopIfTrue=False, fill=FILL_RED)
+                                f_fal_men = FormulaRule(formula=['$F6="⚠ Falta en Mendez"'], stopIfTrue=False, fill=FILL_ORANGE)
+
+                                ws1.conditional_formatting.add(f'A6:F{len(cuits_sorted)+5}', f_dif)
+                                ws1.conditional_formatting.add(f'A6:F{len(cuits_sorted)+5}', f_fal_org)
+                                ws1.conditional_formatting.add(f'A6:F{len(cuits_sorted)+5}', f_fal_men)
+                                
+                                # Añadir formato condicional amarillo a diferencias
+
+
+
 
                                 # ══════ Hoja 2: ANÁLISIS DIFERENCIAS ═══════════════════════════
                                 if not df_matriz_dif.empty:
@@ -3665,7 +3796,7 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                     ws_dif = writer.sheets['Análisis Diferencias']
                                     n_dif = len(df_matriz_dif.columns)
                                     _encabezado(ws_dif, n_dif,
-                                        'MATRIZ DE DIFERENCIAS',
+                                        'DIFERENCIAS',
                                         f'Comprobantes enfrentados para CUITs con diferencias | {periodo}'
                                     )
                                     ws_dif.row_dimensions[4].height = 4
@@ -3680,8 +3811,19 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
 
                                     for row_i in range(6, len(df_matriz_dif) + 6):
                                         origen = ws_dif.cell(row=row_i, column=idx_orig).value
+                                        cuit_val = str(ws_dif.cell(row=row_i, column=1).value).replace("-", "")
+                                        
+                                        m_a = arba_por_cuit.get(cuit_val, 0)
+                                        m_m = mendez_por_cuit.get(cuit_val, 0)
+                                        
                                         is_sub = (origen == 'DIFERENCIA CUIT:')
-                                        fill = FILL_SUB_DIF if is_sub else (FILL_ARBA if origen == 'ARBA' else FILL_MEN)
+                                        
+                                        if is_sub: 
+                                            fill = PatternFill('solid', fgColor='FF9999') # Rojo más notorio
+                                        elif origen == 'MENDEZ': 
+                                            fill = PatternFill('solid', fgColor='F8CBAD') # Naranja claro
+                                        else: 
+                                            fill = PatternFill('solid', fgColor='FFF2CC') # Amarillo claro (AGIP/ARBA)
                                         
                                         for c in range(1, n_dif + 1):
                                             cell = ws_dif.cell(row=row_i, column=c)
@@ -3693,8 +3835,8 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                     _autofit_ws(ws_dif, n_dif)
 
                                 # ══════ Hoja 3: DETALLE ARBA ═══════════════════════════
-                                df_arba_det.to_excel(writer, sheet_name='Detalle ARBA', index=False, startrow=4)
-                                ws2 = writer.sheets['Detalle ARBA']
+                                df_arba_det.to_excel(writer, sheet_name=f'Detalle {organismo}', index=False, startrow=4)
+                                ws2 = writer.sheets[f'Detalle {organismo}']
                                 n2 = len(df_arba_det.columns)
                                 _encabezado(ws2, n2,
                                     f'DETALLE ARBA · {label_tipo.upper()}',
@@ -3717,20 +3859,19 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                         ws2.row_dimensions[row_i].outlineLevel = 0
                                     else:
                                         ws2.row_dimensions[row_i].outlineLevel = 1
+                                        ws2.row_dimensions[row_i].hidden = True
                                     
                                     # Formular 
-                                    if is_sub:
-                                        ws2.cell(row=row_i, column=idx_match_arba).value = (
-                                            f'=IFERROR(VLOOKUP(A{row_i}, \'Cruce x CUIT\'!$A$6:$F${len(cuits_sorted)+5}, 6, 0), "")'
-                                        )
-                                        ws2.cell(row=row_i, column=idx_cant_arba).value = (
-                                            f'=COUNTIFS($A$6:$A${len(df_arba_det)+5}, A{row_i}, $B$6:$B${len(df_arba_det)+5}, "<>*(SUBTOTAL)*")'
-                                        )
-                                    else:
-                                        ws2.cell(row=row_i, column=idx_match_arba).value = (
-                                            f'=IF(COUNTIFS(\'Detalle Mendez\'!$A:$A, A{row_i}, '
-                                            f'\'Detalle Mendez\'!$G:$G, G{row_i})>0, "✓ Ok", "⚠ Falta en Mendez")'
-                                        )
+                                    ws2.cell(row=row_i, column=idx_match_arba).value = (
+                                        f'=IF(COUNTIF(B{row_i}, "*(SUBTOTAL)*")>0, '
+                                        f'IFERROR(VLOOKUP(A{row_i}, \'Cruce x CUIT\'!$A$6:$F${len(cuits_sorted)+5}, 6, 0), ""), '
+                                        f'IF(COUNTIFS(\'Detalle Mendez\'!$A:$A, A{row_i}, \'Detalle Mendez\'!$G:$G, G{row_i})>0, "✓ Ok", "⚠ Falta en Mendez"))'
+                                    )
+                                    ws2.cell(row=row_i, column=idx_cant_arba).value = (
+                                        f'=IF(COUNTIF(B{row_i}, "*(SUBTOTAL)*")>0, '
+                                        f'COUNTIFS($A$6:$A${len(df_arba_det)+5}, A{row_i}, $B$6:$B${len(df_arba_det)+5}, "<>*(SUBTOTAL)*"), '
+                                        f'"")'
+                                    )
 
                                     for c in range(1, n2 + 1):
                                         cell = ws2.cell(row=row_i, column=c)
@@ -3739,6 +3880,20 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                         if is_sub: cell.font = Font(bold=True)
                                         if c == idx_monto_arba: cell.number_format = FMT_MONEY
                                 _autofit_ws(ws2, n2)
+                                
+                                
+                                FILL_YELLOW = PatternFill(start_color='FFF2CC', end_color='FFF2CC', fill_type='solid')
+                                FILL_ORANGE = PatternFill(start_color='F8CBAD', end_color='F8CBAD', fill_type='solid')
+                                FILL_OK     = PatternFill(start_color='E2EFDA', end_color='E2EFDA', fill_type='solid')
+                                str_col = openpyxl.utils.get_column_letter(idx_match_arba)
+                                r_dif = FormulaRule(formula=[f'${str_col}6="⚠ Diferencia"'], stopIfTrue=False, fill=FILL_YELLOW)
+                                r_men = FormulaRule(formula=[f'${str_col}6="⚠ Falta en Mendez"'], stopIfTrue=False, fill=FILL_ORANGE)
+                                r_ok  = FormulaRule(formula=[f'${str_col}6="✓ Ok"'], stopIfTrue=False, fill=FILL_OK)
+                                ws2.conditional_formatting.add(f'A6:{openpyxl.utils.get_column_letter(n2)}{len(df_arba_det)+5}', r_dif)
+                                ws2.conditional_formatting.add(f'A6:{openpyxl.utils.get_column_letter(n2)}{len(df_arba_det)+5}', r_men)
+                                ws2.conditional_formatting.add(f'A6:{openpyxl.utils.get_column_letter(n2)}{len(df_arba_det)+5}', r_ok)
+
+
 
 
                                 # ══════ Hoja 4: DETALLE MENDEZ ══════════════════════════
@@ -3765,20 +3920,19 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                         ws3.row_dimensions[row_i].outlineLevel = 0
                                     else:
                                         ws3.row_dimensions[row_i].outlineLevel = 1
+                                        ws3.row_dimensions[row_i].hidden = True
                                         
                                     # Formula
-                                    if is_sub:
-                                        ws3.cell(row=row_i, column=idx_match_men).value = (
-                                            f'=IFERROR(VLOOKUP(A{row_i}, \'Cruce x CUIT\'!$A$6:$F${len(cuits_sorted)+5}, 6, 0), "")'
-                                        )
-                                        ws3.cell(row=row_i, column=idx_cant_men).value = (
-                                            f'=COUNTIFS($A$6:$A${len(df_mendez_det)+5}, A{row_i}, $B$6:$B${len(df_mendez_det)+5}, "<>*(SUBTOTAL)*")'
-                                        )
-                                    else:
-                                        ws3.cell(row=row_i, column=idx_match_men).value = (
-                                            f'=IF(COUNTIFS(\'Detalle ARBA\'!$A:$A, A{row_i}, '
-                                            f'\'Detalle ARBA\'!$G:$G, G{row_i})>0, "✓ Ok", "⚠ Falta en ARBA")'
-                                        )
+                                    ws3.cell(row=row_i, column=idx_match_men).value = (
+                                        f'=IF(COUNTIF(B{row_i}, "*(SUBTOTAL)*")>0, '
+                                        f'IFERROR(VLOOKUP(A{row_i}, \'Cruce x CUIT\'!$A$6:$F${len(cuits_sorted)+5}, 6, 0), ""), '
+                                        f'IF(COUNTIFS(\'Detalle {organismo}\'!$A:$A, A{row_i}, \'Detalle {organismo}\'!$G:$G, G{row_i})>0, "✓ Ok", "⚠ Falta en {organismo}"))'
+                                    )
+                                    ws3.cell(row=row_i, column=idx_cant_men).value = (
+                                        f'=IF(COUNTIF(B{row_i}, "*(SUBTOTAL)*")>0, '
+                                        f'COUNTIFS($A$6:$A${len(df_mendez_det)+5}, A{row_i}, $B$6:$B${len(df_mendez_det)+5}, "<>*(SUBTOTAL)*"), '
+                                        f'"")'
+                                    )
                                         
                                     for c in range(1, n3 + 1):
                                         cell = ws3.cell(row=row_i, column=c)
@@ -3787,6 +3941,20 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                         if is_sub: cell.font = Font(bold=True)
                                         if c == idx_monto_men: cell.number_format = FMT_MONEY
                                 _autofit_ws(ws3, n3)
+                                
+
+                                FILL_YELLOW = PatternFill(start_color='FFF2CC', end_color='FFF2CC', fill_type='solid')
+                                FILL_RED    = PatternFill(start_color='FCE4D6', end_color='FCE4D6', fill_type='solid')
+                                FILL_OK     = PatternFill(start_color='E2EFDA', end_color='E2EFDA', fill_type='solid')
+                                str_col_m = openpyxl.utils.get_column_letter(idx_match_men)
+                                r_dif_m = FormulaRule(formula=[f'${str_col_m}6="⚠ Diferencia"'], stopIfTrue=False, fill=FILL_YELLOW)
+                                r_org_m = FormulaRule(formula=[f'${str_col_m}6="⚠ Falta en {organismo}"'], stopIfTrue=False, fill=FILL_RED)
+                                r_ok_m  = FormulaRule(formula=[f'${str_col_m}6="✓ Ok"'], stopIfTrue=False, fill=FILL_OK)
+                                ws3.conditional_formatting.add(f'A6:{openpyxl.utils.get_column_letter(n3)}{len(df_mendez_det)+5}', r_dif_m)
+                                ws3.conditional_formatting.add(f'A6:{openpyxl.utils.get_column_letter(n3)}{len(df_mendez_det)+5}', r_org_m)
+                                ws3.conditional_formatting.add(f'A6:{openpyxl.utils.get_column_letter(n3)}{len(df_mendez_det)+5}', r_ok_m)
+
+
 
 
 
@@ -3795,9 +3963,9 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                         # ── Descarga ─────────────────────────────────────────────────
                         nombre_base = Path(uploaded_arba_txt_mendez.name).stem
                         st.download_button(
-                            label="↓  Descargar Excel de Cruce ARBA",
+                            label=f"↓  Descargar Excel de Cruce {organismo}",
                             data=output_cruce,
-                            file_name=f"{nombre_base}_CruceARBA.xlsx",
+                            file_name=f"{nombre_base}_Cruce{organismo}.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             use_container_width=True,
                         )
