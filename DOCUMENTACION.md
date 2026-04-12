@@ -493,9 +493,9 @@ Usa `PROVINCIA_A_JURISDICCION` para mapear nombres de retenciones a códigos de 
 
 Genera archivo TXT para **ARBA** (Agencia de Recaudación de Buenos Aires). Solo extrae percepciones IIBB de Buenos Aires.
 
-**Formato: 81 caracteres por línea:**
+**Formato: 71 caracteres por línea:**
 ```
-CUIT(13) + Fecha(10) + TipoComp(1) + Letra(1) + PV(5) + NroComp(8) + BaseImponible(14) + Alicuota(5) + ImportePerc(13) + Fecha(10) + LetraFija(1)
+CUIT(13) + Fecha(10) + TipoComp(1) + Letra(1) + Sucursal(5) + NroComp(8) + BaseImponible(14) + Alicuota(5) + ImportePerc(13) + LetraFija(1)
 ```
 
 **Cálculolculos especiales:**
@@ -581,11 +581,22 @@ Procesa los CSV exportados del **Portal IVA de ARCA** (comprimidos en .zip). A d
 
 Genera archivos TXT con formato SIFERE. Ofrece elegir entre **Percepciones** o **Retenciones**. Usa `parsear_archivo()` + `generar_sifere_txt()` o `generar_sifere_retenciones_txt()`.
 
-#### 4. Archivo Agente de Percepciones ARBA (.txt)
+#### 4. Agentes de Recaudación ARBA
 
-[app.py:L1942-L2043](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L1942-L2043)
+[app.py:L1975-L2150](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L1975-L2150)
 
-Genera el archivo TXT para declarar percepciones IIBB ante ARBA. Requiere que el usuario ingrese el periodo (MM/AAAA). El nombre del archivo generado sigue la convención ARBA: `AR-CUIT-YYYYMM-P7-1.txt`.
+Herramienta bifuncional para la generación de archivos para la Agencia de Recaudación de la Provincia de Buenos Aires (ARBA). El comportamiento se adapta según el régimen seleccionado:
+
+**A. Percepciones**
+- **Soporta:** TXT nativo (Mendez) o Excel aportado por el cliente.
+- **Formato Output:** Líneas posicionales de 71 caracteres.
+- **Empaquetado:** El sistema adosa automáticamente el código Hash MD5 al nombre del `.ZIP` emitido (ej. `AR-CUIT-AAAAMMQ-P7-LOTE1_{MD5}.ZIP`). El indicador del diseño varía automáticamente a `D7` si se establece como periodo mensual (0).
+
+**B. Retenciones (Diseño A-122R)**
+- **Soporta:** Exclusivamente origen por **Excel** (bloqueo inteligente de formato `.txt`). 
+- **Formato Output:** Líneas posicionales exactas de 67 caracteres (Registro ALTA).
+- **Control Ulterior:** Se requiere configuración explícita de `Quincena`, `Cod. Actividad` y `Nro Lote`.
+- **Empaquetado:** Archivo puro sin hash, acatando el estándar prefijado: `ER-CUIT-AAAAMMQ-ACTIVIDAD-LOTEXXXXX.ZIP`.
 
 #### 5. Liquidaciones Tarjeta FISERV (.pdf)
 
@@ -716,7 +727,7 @@ flowchart TB
         E3["📊 Excel verde<br/>(3 sheets + resumen)"]
         E4["📊 Excel dorado<br/>(Ret + Perc sheets)"]
         S1["📄 TXT SIFERE<br/>(posicional fijo)"]
-        S2["📄 TXT ARBA<br/>(81 chars/línea)"]
+        S2["📄 TXT ARBA<br/>(71 chars/línea)"]
     end
 
     TXT --> P1 --> T1 --> E1

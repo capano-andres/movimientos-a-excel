@@ -2,13 +2,14 @@ import streamlit as st
 import io
 import re
 import zipfile
+import hashlib
 import pandas as pd
 import PyPDF2
 from pathlib import Path
 from openpyxl.styles import Border, Side, Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 import requests
-from extractor_movimientos import parsear_archivo, crear_excel, generar_sifere_txt, generar_sifere_retenciones_txt, generar_percepciones_arba_txt, CONCEPTOS_MAP
+from extractor_movimientos import parsear_archivo, crear_excel, generar_sifere_txt, generar_sifere_retenciones_txt, generar_percepciones_arba, generar_arba_desde_excel, generar_retenciones_arba, generar_retenciones_arba_desde_excel, CONCEPTOS_MAP
 
 @st.cache_data(show_spinner=False)
 def obtener_razon_social_cuitonline(cuit):
@@ -406,7 +407,7 @@ TOOL_PORTAL_IVA = "Movimientos Portal IVA limpio (.zip)"
 TOOL_SIFERE = "Archivos SIFERE (.txt)"
 TOOL_LIQUIDACIONES = "Liquidaciones Tarjeta FISERV (.pdf)"
 TOOL_DEDUCCIONES = "Limpieza Excel Deducciones IVA/Ganancias"
-TOOL_ARBA = "Archivo Agente de Percepciones ARBA (.txt)"
+TOOL_ARBA = "Agentes de Recaudacion ARBA"
 TOOL_CRUCE_CONCEPTO = "Excel Mendez + TXT Mendez"
 TOOL_CM05 = "Papeles de Trabajo CM05"
 TOOL_CRUCE_DEDUCCIONES = "Cruce de Deducciones"
@@ -1975,10 +1976,56 @@ elif herramienta == TOOL_ARBA:
     # ───────────────────────────────────────────────────────────────────────────────
     # HERRAMIENTA: Archivo Percepciones ARBA
     # ───────────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="card"><div class="card-label">01 · Archivo fuente (Movimientos Ventas)</div>', unsafe_allow_html=True)
+    st.info("""
+    **🔗 Diseños de Registro Oficiales ARBA (ARWeb)**
+    * [Ver Formato para Percepciones (PDF)](https://www.arba.gov.ar/archivos/Publicaciones/Nuevo%20Disenio%20de%20Registro%20ARWeb%20Prod..pdf)
+    * [Ver Formato para Retenciones (HTML)](https://www.arba.gov.ar/archivos/Tramites/Diseno-de-registros-de-lotes-de-importacion-A-122R.html)
+    """)
+    
+    st.markdown('<div class="card"><div class="card-label">00 · Tipo de Presentación</div>', unsafe_allow_html=True)
+    tipo_presentacion_arba = st.radio(
+        "Seleccioná el régimen a declarar:",
+        ["Percepciones", "Retenciones"],
+        index=0,
+        horizontal=True,
+        key="arba_tipo"
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="card"><div class="card-label">01 · Archivo fuente (Mendez o Excel)</div>', unsafe_allow_html=True)
+    
+    with st.expander("ℹ️ ¿Cómo debe estar estructurado el Excel?"):
+        if "Retenciones" in tipo_presentacion_arba:
+            st.markdown("""
+            Para la importación de **Retenciones** (diseño A-122R), el archivo debe contener estas columnas (el orden no importa):
+            - **Transacción Agente**: (o "Transaccion", "ID") Identificador interno (máx. 20 dígitos).
+            - **CUIT**: CUIT del contribuyente retenido (con o sin guiones).
+            - **Fecha**: Fecha de la retención (ej: `DD/MM/YYYY` o `YYYY-MM-DD`).
+            - **Sucursal**: (o "PV", "Suc") Punto de venta.
+            - **Base Imponible**: (o "Neto", "Base") Monto imponible sobre el que se retiene.
+            - **Alicuota**: (o "Tasa") Porcentaje de retención (ej: `3.00`).
+            - **Importe Retención**: Monto efectivamente retenido.
+            """)
+        else:
+            st.markdown("""
+            Si vas a cargar un Excel proporcionado por tu cliente para convertirlo al TXT de ARBA, el sistema buscará las siguientes columnas (el orden no importa):
+            - **CUIT**: CUIT del contribuyente percibido/retenido (con o sin guiones).
+            - **Fecha**: Fecha de la operación (ej: `DD/MM/YYYY` o `YYYY-MM-DD`).
+            - **Tipo Comprobante**: (o "Tipo") Ej: `F`, `FC`, `NC`, `C`.
+            - **Letra**: Letra del comprobante (ej: `A`, `B`).
+            - **Sucursal**: (o "PV") Punto de venta.
+            - **Nro Comprobante**: (o "Numero") Número del comprobante.
+            - **Base Imponible**: (o "Neto") Monto base sobre el que se aplicó la alícuota.
+            - **Alicuota**: (o "Tasa") Porcentaje aplicado (ej: `3.00`).
+            - **Importe**: Monto percibido o retenido.
+            """)
+
+    texto_uploader = "Subí tu Excel de Retenciones (.xls, .xlsx)" if "Retenciones" in tipo_presentacion_arba else "Subí tu archivo de ventas (.txt) o tu Excel de deducciones (.xls, .xlsx)"
+    tipos_uploader = ["xls", "xlsx"] if "Retenciones" in tipo_presentacion_arba else ["txt", "prn", "xls", "xlsx"]
+    
     uploaded_arba = st.file_uploader(
-        "Arrastrá tu archivo de movimientos de ventas o hacé click para seleccionarlo",
-        type=["txt", "prn"],
+        texto_uploader,
+        type=tipos_uploader,
         label_visibility="visible",
         key="arba_file"
     )
@@ -1986,71 +2033,130 @@ elif herramienta == TOOL_ARBA:
 
     if uploaded_arba:
         arba_filename = Path(uploaded_arba.name).stem
+        ext = Path(uploaded_arba.name).suffix.lower()
         st.success(f"**{uploaded_arba.name}** listo para procesar")
 
-        # ─── Card 02: Periodo ──────────────────────────────────────────────────────
-        st.markdown('<div class="card"><div class="card-label">02 · Periodo</div>', unsafe_allow_html=True)
-        periodo_arba = st.text_input(
-            "Ingresá el periodo (MM/AAAA)",
-            value="",
-            placeholder="Ej: 03/2026",
-            key="arba_periodo"
-        )
+        # ─── Card 02: Periodo y CUIT ────────────────────────────────────────────────
+        st.markdown('<div class="card"><div class="card-label">02 · Datos de la Declaración</div>', unsafe_allow_html=True)
+        col_p, col_q, col_c = st.columns(3)
+        with col_p:
+            periodo_arba = st.text_input(
+                "Ingresá el periodo (MM/AAAA)",
+                value="",
+                placeholder="Ej: 03/2026",
+                key="arba_periodo"
+            )
+        with col_q:
+            quincena_arba = st.selectbox(
+                "Quincena", 
+                ["0 (Mensual)", "1 (Primera)", "2 (Segunda)"], 
+                key="arba_q"
+            )
+        with col_c:
+            cuit_agente_arba = st.text_input(
+                "Ingresá el CUIT del Agente",
+                value="",
+                placeholder="Ej: 30-12345678-9",
+                key="arba_cuit"
+            )
+            
+        if "Retenciones" in tipo_presentacion_arba:
+            col_a, col_l = st.columns(2)
+            with col_a:
+                actividad_arba = st.text_input("Cod. Actividad", placeholder="Ej: 68", key="arba_act")
+            with col_l:
+                lote_arba = st.text_input("Nro Lote", value="00001", key="arba_lote")
+
         st.markdown('</div>', unsafe_allow_html=True)
 
-        # ─── Card 03: Procesar ─────────────────────────────────────────────────────
-        st.markdown('<div class="card"><div class="card-label">03 · Generar TXT Percepciones ARBA</div>', unsafe_allow_html=True)
+        # ─── Card 03: Procesar y Exportar ZIP ──────────────────────────────────────
+        st.markdown('<div class="card"><div class="card-label">03 · Generar Archivo ARBA ZIP</div>', unsafe_allow_html=True)
 
-        if st.button("⬡  Generar archivo ARBA"):
-            # Validar periodo obligatorio
+        if st.button("⬡  Generar y Hashear ZIP"):
             periodo_limpio = periodo_arba.strip()
-            periodo_match = re.match(r'^(\d{2})/(\d{4})$', periodo_limpio)
-            if not periodo_match:
+            cuit_limpio = cuit_agente_arba.strip().replace('-', '')
+
+            if not re.match(r'^(\d{2})/(\d{4})$', periodo_limpio):
                 st.error("El periodo es obligatorio y debe tener el formato **MM/AAAA** (ej: 03/2026)")
+            elif not cuit_limpio or len(cuit_limpio) != 11:
+                st.error("El CUIT del agente es obligatorio y debe ser válido (11 dígitos, ej: 30123456789)")
             else:
-                mes_p = periodo_match.group(1)
-                anio_p = periodo_match.group(2)
+                mes_p, anio_p = periodo_limpio.split('/')
+                
                 try:
-                    with st.spinner("Procesando movimientos de ventas..."):
-                        raw_bytes = uploaded_arba.getvalue()
-                        content_str = raw_bytes.decode('latin-1', errors='replace')
-                        movimientos, metadata = parsear_archivo(content=content_str)
+                    with st.spinner(f"Procesando {tipo_presentacion_arba}..."):
+                        txt_arba = ""
+                        n_lineas = 0
+                        es_retencion = "Retenciones" in tipo_presentacion_arba
 
-                        # Inyectar periodo ingresado por el usuario
-                        metadata['periodo'] = f"Desde el 01/{mes_p}/{anio_p} hasta el 28/{mes_p}/{anio_p}"
+                        if es_retencion and (not actividad_arba.strip() or not lote_arba.strip()):
+                            st.error("Para Retenciones, el Código de Actividad y el Número de Lote no pueden estar vacíos.")
+                            st.stop()
 
-                        txt_arba = generar_percepciones_arba_txt(movimientos, metadata)
+                        if ext in ['.xls', '.xlsx']:
+                            df_in = pd.read_excel(io.BytesIO(uploaded_arba.getvalue()))
+                            if es_retencion:
+                                txt_arba = generar_retenciones_arba_desde_excel(df_in)
+                            else:
+                                txt_arba = generar_arba_desde_excel(df_in)
+                            n_lineas = len(df_in)
+                        else:
+                            if es_retencion:
+                                st.error("Las Retenciones de ARBA solo pueden generarse a partir de un archivo Excel con las columnas requeridas.")
+                                st.stop()
+                            
+                            raw_bytes = uploaded_arba.getvalue()
+                            content_str = raw_bytes.decode('latin-1', errors='replace')
+                            movimientos, metadata = parsear_archivo(content=content_str)
+                            metadata['periodo'] = f"Desde el 01/{mes_p}/{anio_p} hasta el 28/{mes_p}/{anio_p}"
+                            
+                            txt_arba, _ = generar_percepciones_arba(movimientos, metadata)
+                            n_lineas = len(txt_arba.splitlines())
 
                     if not txt_arba.strip():
-                        st.warning("No se encontraron percepciones IIBB Buenos Aires en los movimientos.")
+                        st.warning(f"No se encontraron operaciones válidas de {tipo_presentacion_arba} en el archivo.")
                     else:
-                        st.success("✓  Archivo Percepciones ARBA generado con éxito")
+                        st.success("✓  Declaración procesada correctamente")
 
-                        # Stats
-                        n_lineas = len(txt_arba.splitlines())
                         st.markdown(f"""
                         <div class="stats-row">
                             <div class="stat-chip">
-                                <span class="stat-val">{len(movimientos)}</span>
-                                <span class="stat-lbl">Movimientos</span>
-                            </div>
-                            <div class="stat-chip">
                                 <span class="stat-val">{n_lineas}</span>
-                                <span class="stat-lbl">Líneas TXT</span>
+                                <span class="stat-lbl">Registros Procesados</span>
                             </div>
                         </div>
                         """, unsafe_allow_html=True)
 
-                        # Nombre archivo ARBA: AR-CUIT-PERIODO-P7-LOTE.txt
-                        cuit_empresa = metadata.get('cuit_empresa', '').replace('-', '')
-                        periodo_file = f"{anio_p}{mes_p}"  # YYYYMM
-                        arba_download_name = f"AR-{cuit_empresa}-{periodo_file}-P7-1.txt"
+                        # ─── Crear archivo ZIP en memoria ───
+                        q_val = quincena_arba.split(" ")[0]
+                        periodo_file = f"{anio_p}{mes_p}{q_val}"  # AAAAMMQ
+
+                        if es_retencion:
+                            lote_fmt = str(lote_arba).zfill(5)[:5]
+                            nombre_txt = f"ER-{cuit_limpio}-{periodo_file}-{actividad_arba.strip()}-LOTE{lote_fmt}.txt"
+                        else:
+                            tipo_letra_perc = "D7" if q_val == "0" else "P7"
+                            nombre_txt = f"AR-{cuit_limpio}-{periodo_file}-{tipo_letra_perc}-LOTE1.txt"
+
+                        txt_bytes = txt_arba.encode("latin-1", errors="replace")
+                        zip_buffer = io.BytesIO()
+                        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                            zipf.writestr(nombre_txt, txt_bytes)
+                        zip_bytes = zip_buffer.getvalue()
+
+                        # ─── Nombres de salida (con/sin Hash) ───
+                        if es_retencion:
+                            # Según indicaciones, retenciones va sin hash MD5
+                            nombre_zip = f"ER-{cuit_limpio}-{periodo_file}-{actividad_arba.strip()}-LOTE{lote_fmt}.ZIP"
+                        else:
+                            hash_md5 = hashlib.md5(zip_bytes).hexdigest().upper()
+                            nombre_zip = f"AR-{cuit_limpio}-{periodo_file}-{tipo_letra_perc}-LOTE1_{hash_md5}.ZIP"
 
                         st.download_button(
-                            label=f"↓  Descargar TXT ({arba_download_name})",
-                            data=txt_arba.encode("latin-1", errors="replace"),
-                            file_name=arba_download_name,
-                            mime="text/plain",
+                            label=f"↓  Descargar {nombre_zip}",
+                            data=zip_bytes,
+                            file_name=nombre_zip,
+                            mime="application/zip",
                             use_container_width=True,
                         )
 

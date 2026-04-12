@@ -2175,10 +2175,10 @@ def generar_sifere_retenciones_txt(transacciones: list[dict], meta: dict) -> str
     return "\n".join(lineas_txt)
 
 
-def generar_percepciones_arba_txt(transacciones: list[dict], meta: dict) -> str:
-    """Genera un archivo TXT con formato ARBA para percepciones IIBB de ventas.
-    Cada línea (81 chars): CUIT(13) + Fecha(10) + TipoComp(1) + Letra(1) + PV(5)
-    + NroComp(8) + BaseImponible(14) + Alicuota(5) + ImportePerc(13) + Fecha(10) + LetraFija(1)
+def generar_percepciones_arba(transacciones: list[dict], meta: dict) -> tuple[str, pd.DataFrame]:
+    """Genera un archivo TXT con formato ARBA para percepciones IIBB de ventas, y un DataFrame equivalente.
+    Cada línea (71 chars): CUIT(13) + Fecha(10) + TipoComp(1) + Letra(1) + PV(5)
+    + NroComp(8) + BaseImponible(14) + Alicuota(5) + ImportePerc(13) + LetraFija(1)
     """
     # ── Mapeo tipo comprobante del sistema → código ARBA (1 char) ──
     TIPO_COMP_ARBA = {
@@ -2228,6 +2228,7 @@ def generar_percepciones_arba_txt(transacciones: list[dict], meta: dict) -> str:
 
     # ── Procesar transacciones ──
     lineas_txt = []
+    filas_excel = []
 
     for t in transacciones:
         dia = t['Fecha']
@@ -2338,22 +2339,345 @@ def generar_percepciones_arba_txt(transacciones: list[dict], meta: dict) -> str:
         else:
             perc_formateada = f"{int(perc_abs):010d}.{f'{perc_abs:.2f}'.split('.')[1]}"
 
-        # ── Construir línea (81 chars) ──
+        # ── Construir línea (71 chars) ──
         linea = (
             f"{cuit_formateado}"          # pos 1-13:  CUIT (13)
             f"{fecha_completa}"           # pos 14-23: Fecha (10)
             f"{tipo_arba}"                # pos 24:    Tipo comprobante (1)
             f"{letra_comp}"               # pos 25:    Letra comprobante (1)
-            f"{pv_formateado}"            # pos 26-30: Punto de venta (5)
+            f"{pv_formateado}"            # pos 26-30: Punto de venta / Sucursal (5)
             f"{nro_formateado}"           # pos 31-38: Nro comprobante (8)
             f"{base_formateada}"          # pos 39-52: Base imponible (14)
             f"{alic_formateada}"          # pos 53-57: Alícuota (5)
             f"{perc_formateada}"          # pos 58-70: Importe percepción (13)
-            f"{fecha_completa}"           # pos 71-80: Fecha repetida (10)
-            f"A"                          # pos 81:    Letra fija (1)
+            f"A"                          # pos 71:    Tipo Operación (Alta) (1)
         )
         lineas_txt.append(linea)
 
+        # ── Construir fila para Excel ──
+        filas_excel.append({
+            'CUIT': cuit_formateado.strip(),
+            'Fecha': fecha_completa,
+            'Tipo Comprobante': tipo_arba,
+            'Letra': letra_comp,
+            'Sucursal': int(pv_formateado),
+            'Nro Comprobante': int(nro_formateado),
+            'Base Imponible': -base_abs if es_nc else base_abs,
+            'Alicuota': alicuota,
+            'Importe Percepción': -perc_abs if es_nc else perc_abs,
+            'Tipo Operación': 'A'
+        })
+
+    df = pd.DataFrame(filas_excel)
+    return "\n".join(lineas_txt), df
+
+
+def generar_arba_desde_excel(df: pd.DataFrame) -> str:
+    """Convierte un DataFrame con formato pre-establecido de nuevo al TXT posicional ARBA de 71 chars."""
+    lineas_txt = []
+    
+    col_map = {str(c).lower().strip(): c for c in df.columns}
+    
+    def get_val(row, posible_names, default=""):
+        for name in posible_names:
+            if name in col_map:
+                v = row[col_map[name]]
+                return "" if pd.isna(v) else v
+        return default
+
+    for _, row in df.iterrows():
+        cuit = get_val(row, ["cuit"])
+        fecha = get_val(row, ["fecha"])
+        tipo = get_val(row, ["tipo comprobante", "tipo"])
+        letra = get_val(row, ["letra"])
+        sucursal = get_val(row, ["sucursal", "suc", "pv"])
+        nro = get_val(row, ["nro comprobante", "numero", "nro"])
+        base = get_val(row, ["base imponible", "base", "neto"])
+        ali = get_val(row, ["alicuota", "tasa"])
+        importe = get_val(row, ["importe percepción", "importe", "percepcion"])
+
+        cuit_str = str(cuit).replace('-', '').replace('.', '').strip()
+        if cuit_str.endswith('0'):
+            # fix for float .0
+            pass
+        if len(cuit_str) == 13 and cuit_str[-2:] == ".0":
+            cuit_str = cuit_str[:-2]
+
+        if len(cuit_str) == 11:
+            cuit_formateado = f"{cuit_str[:2]}-{cuit_str[2:10]}-{cuit_str[10]}".ljust(13)
+        else:
+            cuit_formateado = cuit_str.ljust(13)
+
+        if isinstance(fecha, pd.Timestamp):
+            fecha_str = fecha.strftime("%d/%m/%Y")
+        else:
+            f_str = str(fecha).strip()
+            if len(f_str) >= 10 and '-' in f_str[:10]: # yyyy-mm-dd
+                parts = f_str[:10].split('-')
+                if len(parts) == 3:
+                     fecha_str = f"{parts[2]}/{parts[1]}/{parts[0]}"
+                else:
+                     fecha_str = f_str[:10]
+            else:
+                fecha_str = f_str[:10]
+        fecha_str = fecha_str.ljust(10)
+
+        tipo_str = str(tipo).strip()[0:1].upper() if pd.notna(tipo) and str(tipo).strip() else "F"
+        letra_str = str(letra).strip()[0:1].upper() if pd.notna(letra) and str(letra).strip() else "A"
+        
+        try:
+            suc_val = float(str(sucursal).replace(',','.')) if str(sucursal).strip() else 0
+            sucursal_str = str(int(suc_val)).zfill(5)
+        except Exception:
+            sucursal_str = "00000"
+            
+        try:
+            nro_val = float(str(nro).replace(',','.')) if str(nro).strip() else 0
+            nro_str = str(int(nro_val)).zfill(8)
+        except Exception:
+            nro_str = "00000000"
+
+        # --- Detección y corrección de Formato Porcentaje de Excel ---
+        # Si Excel envía 1,50% como una celda porcentaje, pandas lo lee como 0.015
+        try:
+            b_val = float(str(base).replace(',', '.'))
+            i_val = float(str(importe).replace(',', '.'))
+            calc_ali = (abs(i_val) / abs(b_val) * 100) if b_val != 0 else 0.0
+        except Exception:
+            calc_ali = 0.0
+
+        try:
+            a_str = str(ali).strip().replace(',', '.')
+            if '%' in a_str:
+                a_val = float(a_str.replace('%', ''))
+            else:
+                a_val = float(a_str)
+                # Si a_val es fracción y multiplicarlo por 100 coincide con la alícuota calculada teórica
+                if a_val < 1.0 and calc_ali > 0.0:
+                    if abs(a_val * 100 - calc_ali) < 0.1:
+                        a_val = a_val * 100
+            ali = a_val
+        except Exception:
+            if calc_ali > 0.0:
+                ali = calc_ali
+        # -----------------------------------------------------------
+
+        def fmt_float(val, int_len):
+            try:
+                v = float(str(val).replace(',', '.'))
+                abs_v = abs(v)
+                s_int = str(int(abs_v)).zfill(int_len)
+                s_dec = ("%.2f" % abs_v).split('.')[1]
+                if v < 0:
+                    return f"-{str(int(abs_v)).zfill(int_len-1)}.{s_dec}"
+                return f"{s_int}.{s_dec}"
+            except Exception:
+                return ("0" * int_len) + ".00"
+                
+        base_f = fmt_float(base, 11)
+        ali_f = fmt_float(ali, 2)
+        imp_f = fmt_float(importe, 10)
+        
+        linea = (
+            f"{cuit_formateado}"          
+            f"{fecha_str}"                
+            f"{tipo_str}"                 
+            f"{letra_str}"                
+            f"{sucursal_str}"             
+            f"{nro_str}"                  
+            f"{base_f}"                   
+            f"{ali_f}"                    
+            f"{imp_f}"                    
+            f"A"                          
+        )
+        lineas_txt.append(linea)
+        
+    return "\n".join(lineas_txt)
+
+
+def _es_retencion_bs_as(nombre: str) -> bool:
+    """Detecta si un rubro corresponde a una retención de IIBB Buenos Aires 'normal' (sin SIRTAC/SIRCREB/Bancarias)"""
+    n_lower = nombre.lower()
+    if any(excl in n_lower for excl in ['sirtac', 'sircreb', 'bco', 'bancari', 'banco', 'bc']):
+        return False
+    if ('ret' in n_lower or 'rt' in n_lower) and ('bs' in n_lower or 'as' in n_lower or 'ba' in n_lower or 'b.a' in n_lower or 'buenos' in n_lower):
+        return True
+    return False
+
+def generar_retenciones_arba(movimientos: list, metadata: dict) -> tuple[str, pd.DataFrame]:
+    """Genera el archivo TXT para ARBA Retenciones (67 caracteres) a partir de compras Mendez."""
+    lineas_txt = []
+    filas_excel = []
+
+    for mov in movimientos:
+        for t in mov['Transacciones']:
+            monto_retencion = 0.0
+            
+            for imp in t.get('OtrosImpuestos', []):
+                if imp['Tipo'] == 'RET' and imp['Monto'] != 0.0:
+                    if _es_retencion_bs_as(imp['Nombre']):
+                        monto_retencion += abs(imp['Monto'])
+
+            if monto_retencion == 0.0:
+                continue
+
+            try:
+                nro_str = str(int(t['Numero'])).zfill(20)[:20]
+            except Exception:
+                nro_str = "0".zfill(20)
+
+            cuit_str = mov['CUIT'].replace('-', '').replace('.', '').strip()
+            cuit_formateado = cuit_str.ljust(11)[:11]
+
+            try:
+                suc_val = int(t['PuntoVenta'])
+                sucursal_str = str(suc_val).zfill(5)[:5]
+            except Exception:
+                sucursal_str = "00000"
+
+            fecha_str = mov['Fecha'].strftime('%d/%m/%Y')
+
+            importe = monto_retencion
+            base = t['Neto']
+            try:
+                if base != 0: alic = abs(importe) / abs(base) * 100
+                else: alic = 0.0
+            except Exception:
+                alic = 0.0
+
+            def fmt_float(val, int_len):
+                try:
+                    v = float(str(val).replace(',', '.'))
+                    abs_v = abs(v)
+                    s_int = str(int(abs_v)).zfill(int_len)
+                    s_dec = ("%.2f" % abs_v).split('.')[1]
+                    if v < 0:
+                        return f"-{str(int(abs_v)).zfill(int_len-1)}.{s_dec}"
+                    return f"{s_int}.{s_dec}"
+                except Exception:
+                    return ("0" * int_len) + ".00"
+
+            ali_f = fmt_float(alic, 2)     # format 99.99 (5)
+            base_f = fmt_float(base, 13)   # format 9999999999999.99 (16)
+
+            linea = (
+                f"{nro_str}"
+                f"{cuit_formateado}"
+                f"{sucursal_str}"
+                f"{fecha_str}"
+                f"{ali_f}"
+                f"{base_f}"
+            )
+            lineas_txt.append(linea)
+
+            filas_excel.append({
+                'Transaccion Agente': nro_str,
+                'CUIT': mov['CUIT'],
+                'Sucursal': sucursal_str,
+                'Fecha': fecha_str,
+                'Base Imponible': base,
+                'Alicuota': alic,
+                'Importe': importe
+            })
+
+    df = pd.DataFrame(filas_excel)
+    return "\n".join(lineas_txt), df
+
+
+def generar_retenciones_arba_desde_excel(df: pd.DataFrame) -> str:
+    """Convierte un DataFrame con formato pre-establecido al TXT posicional ARBA Retenciones (67 chars)."""
+    lineas_txt = []
+    
+    col_map = {str(c).lower().strip(): c for c in df.columns}
+    
+    def get_val(row, posible_names, default=""):
+        for name in posible_names:
+            if name in col_map:
+                v = row[col_map[name]]
+                return "" if pd.isna(v) else v
+        return default
+
+    for _, row in df.iterrows():
+        nro_trans = get_val(row, ["transaccion", "nro transaccion agente", "transaccion agente", "id"])
+        cuit = get_val(row, ["cuit"])
+        fecha = get_val(row, ["fecha"])
+        sucursal = get_val(row, ["sucursal", "suc", "pv"])
+        base = get_val(row, ["base imponible", "base", "neto"])
+        ali = get_val(row, ["alicuota", "tasa"])
+        importe = get_val(row, ["importe retencion", "importe", "retencion", "ret"])
+
+        try:
+            nro_str = str(int(float(nro_trans))).zfill(20)[:20] if str(nro_trans).strip() else "0".zfill(20)
+        except Exception:
+            nro_str = "0".zfill(20)
+
+        cuit_str = str(cuit).replace('-', '').replace('.', '').strip()
+        if cuit_str.endswith('.0') and len(cuit_str) == 13: cuit_str = cuit_str[:-2]
+        cuit_formateado = cuit_str.ljust(11)[:11]
+
+        if isinstance(fecha, pd.Timestamp):
+            fecha_str = fecha.strftime("%d/%m/%Y")
+        else:
+            f_str = str(fecha).strip()
+            if len(f_str) >= 10 and '-' in f_str[:10]:
+                parts = f_str[:10].split('-')
+                if len(parts) == 3: fecha_str = f"{parts[2]}/{parts[1]}/{parts[0]}"
+                else: fecha_str = f_str[:10]
+            else:
+                fecha_str = f_str[:10]
+        fecha_str = fecha_str.ljust(10)[:10]
+
+        try:
+            suc_val = float(str(sucursal).replace(',','.')) if str(sucursal).strip() else 0
+            sucursal_str = str(int(suc_val)).zfill(5)[:5]
+        except Exception:
+            sucursal_str = "00000"
+
+        try:
+            b_val = float(str(base).replace(',', '.'))
+            i_val = float(str(importe).replace(',', '.'))
+            calc_ali = (abs(i_val) / abs(b_val) * 100) if b_val != 0 else 0.0
+        except Exception:
+            calc_ali = 0.0
+
+        try:
+            a_str = str(ali).strip().replace(',', '.')
+            if '%' in a_str:
+                a_val = float(a_str.replace('%', ''))
+            else:
+                a_val = float(a_str)
+                if a_val < 1.0 and calc_ali > 0.0:
+                    if abs(a_val * 100 - calc_ali) < 0.1:
+                        a_val = a_val * 100
+            ali = a_val
+        except Exception:
+            if calc_ali > 0.0: ali = calc_ali
+
+        def fmt_float(val, int_len):
+            try:
+                v = float(str(val).replace(',', '.'))
+                abs_v = abs(v)
+                s_int = str(int(abs_v)).zfill(int_len)
+                s_dec = ("%.2f" % abs_v).split('.')[1]
+                if v < 0:
+                    return f"-{str(int(abs_v)).zfill(int_len-1)}.{s_dec}"
+                return f"{s_int}.{s_dec}"
+            except Exception:
+                return ("0" * int_len) + ".00"
+                
+        base_f = fmt_float(base, 13)
+        ali_f = fmt_float(ali, 2)
+        
+        linea = (
+            f"{nro_str}"          
+            f"{cuit_formateado}"                
+            f"{sucursal_str}"                 
+            f"{fecha_str}"                
+            f"{ali_f}"             
+            f"{base_f}"                  
+        )
+        lineas_txt.append(linea)
+        
     return "\n".join(lineas_txt)
 
 
