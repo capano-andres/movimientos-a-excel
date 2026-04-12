@@ -7,7 +7,38 @@ import PyPDF2
 from pathlib import Path
 from openpyxl.styles import Border, Side, Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
+import requests
 from extractor_movimientos import parsear_archivo, crear_excel, generar_sifere_txt, generar_sifere_retenciones_txt, generar_percepciones_arba_txt, CONCEPTOS_MAP
+
+@st.cache_data(show_spinner=False)
+def obtener_razon_social_cuitonline(cuit):
+    clean_cuit = re.sub(r'[^0-9]', '', str(cuit)).strip()
+    url = f"https://www.cuitonline.com/detalle/{clean_cuit}/"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "es-AR,es;q=0.9",
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            html = response.text
+            if "detailResults" not in html and "Actividades" not in html:
+                return None
+            
+            # Buscar en H1
+            h1_match = re.search(r'<h1[^>]*>([^<]+)</h1>', html, re.IGNORECASE)
+            if h1_match:
+                return h1_match.group(1).strip()
+            
+            # Fallback en Title
+            title_match = re.search(r'<title>([^(]+)\(', html)
+            if title_match:
+                return title_match.group(1).strip()
+    except Exception:
+        pass
+    return None
+
 
 # --- Page Config ---
 st.set_page_config(
@@ -378,10 +409,11 @@ TOOL_DEDUCCIONES = "Limpieza Excel Deducciones IVA/Ganancias"
 TOOL_ARBA = "Archivo Agente de Percepciones ARBA (.txt)"
 TOOL_CRUCE_CONCEPTO = "Excel Mendez + TXT Mendez"
 TOOL_CM05 = "Papeles de Trabajo CM05"
+TOOL_CRUCE_DEDUCCIONES = "Cruce de Deducciones"
 
 herramienta = st.selectbox(
     "Seleccioná la herramienta:",
-    options=[TOOL_MOVIMIENTOS, TOOL_PORTAL_IVA, TOOL_SIFERE, TOOL_ARBA, TOOL_LIQUIDACIONES, TOOL_DEDUCCIONES, TOOL_CRUCE_CONCEPTO, TOOL_CM05],
+    options=[TOOL_MOVIMIENTOS, TOOL_PORTAL_IVA, TOOL_SIFERE, TOOL_ARBA, TOOL_LIQUIDACIONES, TOOL_DEDUCCIONES, TOOL_CRUCE_CONCEPTO, TOOL_CM05, TOOL_CRUCE_DEDUCCIONES],
     index=0,
 )
 
@@ -2847,6 +2879,869 @@ elif herramienta == TOOL_CM05:
             letter-spacing: 0.12em;
         ">
             SUBÍ EL TXT Y EL EXCEL SISTEMA · PASOS 01 Y 02
+        </div>
+        """, unsafe_allow_html=True)
+
+elif herramienta == TOOL_CRUCE_DEDUCCIONES:
+    # ───────────────────────────────────────────────────────────────────────────────
+    # HERRAMIENTA: Cruce de Deducciones
+    # Cruza el TXT de Mendez con reportes/padrones de ARBA, AGIP e IVA
+    # ───────────────────────────────────────────────────────────────────────────────
+    
+    st.markdown('<div class="card"><div class="card-label">00 · Configuración del Cruce</div>', unsafe_allow_html=True)
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        organismo = st.selectbox("Organismo:", ["ARBA", "AGIP", "IVA"], index=0)
+    with col2:
+        tipo_cruce_sel = st.selectbox("Tipo de Deducción:", ["Percepciones", "Retenciones"], index=0)
+    with col3:
+        periodo_estrategia = st.selectbox("Frecuencia:", ["Mensual", "Varios Periodos"], index=0)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if organismo in ["AGIP", "IVA"]:
+        st.info(f"🚧 El cruce de deducciones para **{organismo}** se encuentra en desarrollo activo.")
+        st.stop()
+
+    if periodo_estrategia == "Varios Periodos":
+        st.info("🚧 El cruce para **Varios Períodos** simultáneos se encuentra en desarrollo. Temporalmente usá el modo Mensual.")
+        st.stop()
+
+
+    # ── Función de parsing del TXT ARBA ─────────────────────────────────────────────
+    def parsear_arba_iibb(content: str, tipo_default: str = None) -> dict:
+        """
+        Parsea el archivo TXT de ARBA de percepciones/retenciones de IIBB Buenos Aires.
+
+        El archivo puede tener secciones marcadas por cabeceras de texto:
+            PERCEPCIONES:  (o la línea contiene 'PERCEP')
+            ... líneas de datos ...
+            rETENCIONES:   (o la línea contiene 'RETEN')
+            ... líneas de datos ...
+
+        Si no se detectan cabeceras, usa tipo_default ('P' o 'R') para todos los registros.
+
+        Formato de cada línea de datos:
+            Posición  1- 3: Código jurisdicción (029=Bs.As. percep, 019=Bs.As. reten)
+            Posición  4- 5: Código régimen ARBA (ej: 02)
+            Posición  6-18: CUIT con guiones (XX-XXXXXXXX-X)
+            Posición 19-28: Fecha DD/MM/YYYY
+            Posición 29-33: PV sucursal (5 chars)
+            Posición 34-52: Número comprobante (19 chars)
+            Posición 53-54: Tipo comprobante (FC, FA, CA, R , O , etc.)
+            Posición 55+  : Monto con ceros a la izquierda y coma decimal
+        """
+        percepciones = []
+        retenciones  = []
+        seccion_activa = tipo_default  # usar default si no hay headers
+
+        for linea in content.splitlines():
+            linea_strip = linea.strip()
+            if not linea_strip:
+                continue
+
+            # Detectar cabecera de seción (case-insensitive, tolera espacios)
+            linea_upper = linea_strip.upper()
+            if 'PERCEP' in linea_upper and len(linea_strip) < 40:
+                seccion_activa = "P"
+                continue
+            if 'RETEN' in linea_upper and len(linea_strip) < 40:
+                seccion_activa = "R"
+                continue
+
+            # Ignorar si es muy corta o si empieza con letra (cabecera de texto)
+            if seccion_activa is None or len(linea_strip) < 30:
+                continue
+            # Ignorar líneas que no empiezan con dígito (son cabeceras de texto)
+            if not linea_strip[0].isdigit():
+                continue
+
+            try:
+                # Campos comunes a ambas secciones
+                # Formato (0-indexed):
+                #   [0:5]   → código jurisdicción + régimen (ej: 02902)
+                #   [5:18]  → CUIT con guiones: XX-XXXXXXXX-X (13 chars)
+                #   [18:28] → Fecha DD/MM/YYYY (10 chars)
+                #   [28:33] → PV sucursal (5 chars)
+                #   [33:53] → Número comprobante (20 chars)
+                #   [53:55] → Tipo comprobante (2 chars: FC, FA, CA, R , O …)
+                #   [55:]   → Monto (con ceros a la izq. y coma decimal)
+                cod_jur  = linea_strip[0:5]         # ej: "02902"
+                cuit     = linea_strip[5:18]         # XX-XXXXXXXX-X
+                fecha_s  = linea_strip[18:28]        # DD/MM/YYYY
+                pv_s     = linea_strip[28:33]        # 5 chars
+                nro_s    = linea_strip[33:53]        # 20 chars  ← era 33:52 (19), corregido
+                tipo_c   = linea_strip[53:55].strip()  # FC, FA, CA, R, O…  ← era 52:54
+                monto_s  = linea_strip[55:].strip()    # resto = monto  ← era 54:
+
+                # Validar que la fecha tenga formato DD/MM/YYYY (sanity check)
+                if len(fecha_s) < 10 or '/' not in fecha_s:
+                    continue
+
+                # Convertir monto: quitar signo si es negativo, normalizar coma→punto
+                signo = -1 if monto_s.startswith('-') else 1
+                monto_limpio = monto_s.lstrip('-').replace('.', '').replace(',', '.')
+                try:
+                    monto_f = signo * float(monto_limpio)
+                except ValueError:
+                    monto_f = 0.0
+
+                # Normalizar CUIT: quitar guiones para el cruce
+                cuit_limpio = cuit.replace('-', '').strip()
+
+                # Normalizar PV y nro: quitar ceros a la izquierda
+                try:
+                    pv_norm = str(int(pv_s))
+                except ValueError:
+                    pv_norm = pv_s.strip()
+                try:
+                    nro_norm = str(int(nro_s))
+                except ValueError:
+                    nro_norm = nro_s.strip()
+
+                registro = {
+                    'tipo_reg':    seccion_activa,   # 'P' o 'R'
+                    'cod_jur':     cod_jur,          # 5 chars: ej "02902"
+                    'cuit':        cuit.strip(),
+                    'cuit_limpio': cuit_limpio,
+                    'fecha':       fecha_s,
+                    'pv':          pv_s.strip(),
+                    'pv_norm':     pv_norm,
+                    'nro':         nro_s.strip(),
+                    'nro_norm':    nro_norm,
+                    'tipo_comp':   tipo_c,
+                    'monto':       monto_f,
+                }
+
+                if seccion_activa == "P":
+                    percepciones.append(registro)
+                else:
+                    retenciones.append(registro)
+
+            except Exception:
+                continue   # Línea malformada → ignorar
+
+        return {'percepciones': percepciones, 'retenciones': retenciones}
+
+
+    # ── Card 01: TXT Mendez ─────────────────────────────────────────────────────────
+    st.markdown('<div class="card"><div class="card-label">01 · Archivo TXT Mendez (movimientos)</div>', unsafe_allow_html=True)
+    uploaded_arba_txt_mendez = st.file_uploader(
+        "Arrastrá el TXT de movimientos de Mendez o hacé click para seleccionarlo",
+        type=["txt", "prn"],
+        label_visibility="visible",
+        key="cruce_arba_txt_mendez"
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Card 02: TXT ARBA ───────────────────────────────────────────────────────────
+    st.markdown(f'<div class="card"><div class="card-label">02 · Archivo TXT {organismo}</div>', unsafe_allow_html=True)
+
+    uploaded_arba_txt_arba = st.file_uploader(
+        f"Arrastrá el archivo de {organismo} o hacé click para seleccionarlo",
+        type=["txt", "csv", "xlsx"],
+        label_visibility="visible",
+        key="cruce_arba_txt_arba"
+    )
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Procesamiento con ambos archivos ────────────────────────────────────────────
+    if uploaded_arba_txt_mendez and uploaded_arba_txt_arba:
+        st.success(f"**{uploaded_arba_txt_mendez.name}** + **{uploaded_arba_txt_arba.name}** listos para analizar")
+
+        # Configurar parámetro de cruce desde la UI
+        tipo_default_arba = "P" if "Percepciones" in tipo_cruce_sel else "R"
+
+
+        # ── Card 03: Acción ─────────────────────────────────────────────────────────
+        st.markdown('<div class="card"><div class="card-label">03 · Procesar</div>', unsafe_allow_html=True)
+
+        if st.button("⬡  Cruzar y exportar Excel"):
+            try:
+                # ── 1. Parsear TXT Mendez ────────────────────────────────────────────
+                with st.spinner("Parseando TXT Mendez..."):
+                    txt_mendez_content = uploaded_arba_txt_mendez.getvalue().decode("latin-1", errors="replace")
+                    transacciones_arba, meta_arba = parsear_archivo(content=txt_mendez_content)
+
+                    # Extraer mes y año de Mendez desde el encabezado (ej. "Desde 01/03/2026 hasta...")
+                    import re
+                    mes_anio_mendez = ""
+                    if meta_arba and meta_arba.get('periodo'):
+                        match_ma = re.search(r'/(\d{2}/\d{4}|\d{2}/\d{2})', meta_arba['periodo'])
+                        if match_ma:
+                            mes_anio_mendez = match_ma.group(1)
+
+
+                if not transacciones_arba:
+                    st.error("No se encontraron transacciones en el TXT Mendez. Verificá el formato.")
+                else:
+                    # ── 2. Parsear TXT ARBA ──────────────────────────────────────────
+                    with st.spinner("Parseando TXT ARBA..."):
+                        arba_content = uploaded_arba_txt_arba.getvalue().decode("latin-1", errors="replace")
+                        arba_data    = parsear_arba_iibb(arba_content, tipo_default=tipo_default_arba)
+
+                    percepciones = arba_data['percepciones']
+                    retenciones  = arba_data['retenciones']
+                    registros_activos = percepciones + retenciones
+
+                    if tipo_default_arba == "P":
+                        label_tipo = "Percepciones"
+                        kw_mendez = ("PERC", "BS.AS", "BSAS", "BS AS", "BUENOS AIRES")
+                        excl_mendez = ("ADUA", "I.V.A", "IVA", "GCIAS")
+                    elif tipo_default_arba == "R":
+                        label_tipo = "Retenciones"
+                        kw_mendez = ("RET", "BS.AS", "BSAS", "BS AS", "BUENOS AIRES")
+                        excl_mendez = ("SIRCREB", "SIRTAC", "BCO", "GCIAS", "IVA", "BANCO", "BANCAR")
+                    else:
+                        label_tipo = "Percepciones + Retenciones"
+                        kw_mendez = ("PERC", "RET", "BS.AS", "BSAS", "BS AS", "BUENOS AIRES")
+                        excl_mendez = ("ADUA", "I.V.A", "IVA", "GCIAS", "SIRCREB", "SIRTAC", "BCO", "BANCO")
+
+                    if not registros_activos:
+                        st.warning(f"El TXT ARBA no contiene registros. Verificá el contenido del archivo.")
+                    else:
+                        # ── 3. Extraer percepciones/retenciones Bs.As. de Mendez ─────
+                        with st.spinner("Cruzando por CUIT..."):
+                            IVA_RATES_SET = {
+                                'Tasa 21%', 'T.21%', 'C.F.21%', 'Tasa 27%', 'T.27%',
+                                'Tasa 10.5%', 'Tasa 10,5%', 'T.10.5%', 'T.10,5%',
+                                'C.F.10.5%', 'C.F.10,5%', 'Tasa 5%', 'T.5%',
+                                'Tasa 2.5%', 'Tasa 2,5%', 'T.2.5%', 'T.2,5%',
+                                'T.IMP 21%', 'T.IMP 10%', 'Exento', 'R.Monot21', 'R.Mont.10',
+                            }
+                            KEYWORDS_BSAS = ("BS.AS", "BSAS", "BS AS", "BUENOS AIRES")
+
+                            def _es_bsas_comp(nombre: str, tipo_reg: str) -> bool:
+                                """Filtra sub-conceptos de Mendez que sean IIBB Bs.As."""
+                                if not nombre or nombre in IVA_RATES_SET:
+                                    return False
+                                nu = nombre.upper()
+                                # Debe contener la keyword de tipo (PERC o RET)
+                                if tipo_reg == "P" and "PERC" not in nu:
+                                    return False
+                                if tipo_reg == "R" and "RET" not in nu:
+                                    return False
+                                if tipo_reg is None:
+                                    if "PERC" not in nu and "RET" not in nu:
+                                        return False
+                                # Debe ser de Bs.As.
+                                if not any(kw in nu for kw in KEYWORDS_BSAS):
+                                    return False
+                                # Excluir no deseados
+                                excl = ("ADUA", "I.V.A", "IVA", "GCIAS", "SIRCREB", "SIRTAC", "BCO", "BANCO")
+                                if any(x in nu for x in excl):
+                                    return False
+                                return True
+
+                            # Acumular monto Bs.As. por CUIT desde Mendez
+                            mendez_por_cuit = {}   # cuit_limpio → monto
+                            mendez_detalle  = []   # registros para hoja detalle
+
+                            for t in transacciones_arba:
+                                cuit_raw = t.get('CUIT', '')
+                                cuit_limpio = cuit_raw.replace('-', '').strip()
+                                if not cuit_limpio:
+                                    continue
+
+                                monto_bsas = 0.0
+                                concepto_encontrado = ''
+
+                                # Desde la tasa principal
+                                tasa = t.get('Tasa', '')
+                                if tasa and _es_bsas_comp(tasa, tipo_default_arba):
+                                    monto_bsas += t.get('Neto', 0.0)
+                                    concepto_encontrado = tasa
+
+                                # Desde sub-conceptos
+                                for s in t.get('SubConceptos', []):
+                                    nom = s.get('Concepto', '')
+                                    if _es_bsas_comp(nom, tipo_default_arba):
+                                        m = s['Neto'] if s.get('Neto', 0) != 0 else s.get('Percepcion', 0)
+                                        monto_bsas += m
+                                        if not concepto_encontrado:
+                                            concepto_encontrado = nom
+
+                                if monto_bsas != 0.0:
+                                    # Invertir signo si es Nota de Crédito (NC)
+                                    if t.get('Tipo') == 'NC':
+                                        monto_bsas = -monto_bsas
+
+                                    mendez_por_cuit[cuit_limpio] = mendez_por_cuit.get(cuit_limpio, 0.0) + monto_bsas
+
+                                    # Separar PV y Nro del número (quitar letra final si existe)
+                                    numero_raw = t.get('Numero', '')
+                                    if '-' in numero_raw:
+                                        pv_m = numero_raw.split('-')[0].lstrip('0') or '0'
+                                        nro_m = numero_raw.split('-')[1]
+                                    else:
+                                        pv_m  = numero_raw[:5].lstrip('0') or '0'
+                                        nro_m = numero_raw[5:]
+                                    # Quitar letra final del número
+                                    if nro_m and nro_m[-1].isalpha():
+                                        nro_m = nro_m[:-1]
+                                    try:
+                                        nro_m = str(int(nro_m))
+                                        pv_m  = str(int(pv_m))
+                                    except ValueError:
+                                        pass
+                                    # CUIT con guiones para la hoja
+                                    cuit_raw_fmt = cuit_raw if '-' in cuit_raw else (
+                                        f"{cuit_raw[:2]}-{cuit_raw[2:10]}-{cuit_raw[10]}" if len(cuit_raw) == 11 else cuit_raw
+                                    )
+                                    
+                                    # Formatear Fecha Mendez
+                                    dia_raw = str(t.get('Fecha', '')).strip()
+                                    fecha_fmt = dia_raw
+                                    if dia_raw.isdigit() and mes_anio_mendez:
+                                        fecha_fmt = f"{int(dia_raw):02d}/{mes_anio_mendez}"
+
+                                    mendez_detalle.append({
+                                        'CUIT':       cuit_raw_fmt,
+                                        'Proveedor':  t.get('Proveedor', ''),
+                                        'Fecha':      fecha_fmt,
+                                        'Tipo Comp.': t.get('Tipo', ''),
+
+                                        'PV':         pv_m,
+                                        'Nro':        nro_m,
+                                        'Monto':      round(monto_bsas, 2),
+                                    })
+
+                            # Acumular monto por CUIT desde ARBA
+                            arba_por_cuit = {}   # cuit_limpio → monto
+                            for r in registros_activos:
+                                ck = r['cuit_limpio']
+                                arba_por_cuit[ck] = arba_por_cuit.get(ck, 0.0) + r['monto']
+
+                            # Construir tabla de cruce
+                            all_cuits = set(mendez_por_cuit.keys()) | set(arba_por_cuit.keys())
+                            # Construir lookup CUIT → proveedor desde Mendez
+                            cuit_proveedor = {}
+                            for t in transacciones_arba:
+                                ck = t.get('CUIT', '').replace('-', '').strip()
+                                if ck and ck not in cuit_proveedor:
+                                    cuit_proveedor[ck] = t.get('Proveedor', '')
+
+                            # Buscar en CuitOnline los CUITs de ARBA que no están en Mendez
+                            cuits_faltantes = [ck for ck in arba_por_cuit.keys() if ck not in cuit_proveedor]
+                            if cuits_faltantes:
+                                prog_text = f"Buscando {len(cuits_faltantes)} proveedores en CuitOnline..."
+                                progress_bar = st.progress(0, text=prog_text)
+                                for idx_cf, ck in enumerate(cuits_faltantes):
+                                    rz = obtener_razon_social_cuitonline(ck)
+                                    if rz:
+                                        cuit_proveedor[ck] = rz + " (CuitOnline)"
+                                    else:
+                                        cuit_proveedor[ck] = "⚠ SIN PROVEEDOR"
+                                    progress_bar.progress((idx_cf + 1) / len(cuits_faltantes), text=prog_text)
+                                progress_bar.empty()
+
+                            filas_cruce = []
+                            for ck in sorted(all_cuits):
+                                m_mendez = mendez_por_cuit.get(ck, 0.0)
+                                m_arba   = arba_por_cuit.get(ck, 0.0)
+                                diff     = round(m_arba - m_mendez, 2)
+                                # Formatear CUIT con guiones
+                                cuit_fmt = f"{ck[:2]}-{ck[2:10]}-{ck[10]}" if len(ck) == 11 else ck
+                                # Estado
+                                if diff == 0.0:
+                                    estado = "✓ OK"
+                                elif m_mendez == 0.0:
+                                    estado = "⚠ Falta en Mendez"
+                                elif m_arba == 0.0:
+                                    estado = "⚠ Falta en ARBA"
+                                else:
+                                    estado = "⚠ Diferencia"
+                                filas_cruce.append({
+                                    'CUIT': cuit_fmt,
+                                    'Proveedor': cuit_proveedor.get(ck, ''),
+                                    f'Total ARBA ({label_tipo})': round(m_arba, 2),
+                                    'Total Mendez': round(m_mendez, 2),
+                                    'Diferencia (ARBA - Mendez)': diff,
+                                    'Estado': estado,
+                                })
+
+                            df_cruce = pd.DataFrame(filas_cruce)
+                            # Helper subtotales
+                            def agregar_subtotales_cuit(lista_dicts, col_monto='Monto'):
+                                if not lista_dicts: return []
+                                # Ordenar por CUIT y Fecha
+                                lista_dicts.sort(key=lambda x: (x.get('CUIT', ''), x.get('Fecha', '')))
+                                filas_out = []
+                                last_cuit = None
+                                last_prov = ""
+                                run_sum = 0.0
+                                for r in lista_dicts:
+                                    cuit = r.get('CUIT', '')
+                                    prov = r.get('Proveedor', '')
+                                    if prov and "SIN PROVEEDOR" not in prov:
+                                        last_prov = prov
+
+                                    if last_cuit is not None and cuit != last_cuit:
+                                        sub = {k: '' for k in lista_dicts[0].keys()}
+                                        sub['CUIT'] = last_cuit
+                                        sub['Proveedor'] = f"{last_prov} (SUBTOTAL)" if last_prov else "(SUBTOTAL)"
+                                        sub[col_monto] = run_sum
+                                        filas_out.append(sub)
+                                        run_sum = 0.0
+                                        last_prov = prov
+                                    
+                                    last_cuit = cuit
+                                    run_sum += r.get(col_monto, 0.0)
+                                    filas_out.append(r)
+                                
+                                if last_cuit is not None:
+                                    sub = {k: '' for k in lista_dicts[0].keys()}
+                                    sub['CUIT'] = last_cuit
+                                    sub['Proveedor'] = f"{last_prov} (SUBTOTAL)" if last_prov else "(SUBTOTAL)"
+                                    sub[col_monto] = run_sum
+
+                                    filas_out.append(sub)
+                                return filas_out
+
+                            arba_detalle_list = [{
+                                'CUIT':       r['cuit'],
+                                'Proveedor':  cuit_proveedor.get(r['cuit_limpio'], ''),
+                                'Fecha':      r['fecha'],
+                                'Tipo Comp.': r['tipo_comp'],
+                                'PV':         r['pv_norm'],
+                                'Nro':        r['nro_norm'],
+                                'Monto':      r['monto'],
+                            } for r in registros_activos]
+
+                            # -------------------------------------------------------------
+                            # Matriz de Diferencias (Hoja orientada a conciliación rápida)
+                            # -------------------------------------------------------------
+                            lista_dif = []
+                            for ck in sorted(all_cuits):
+                                m_mendez = mendez_por_cuit.get(ck, 0.0)
+                                m_arba   = arba_por_cuit.get(ck, 0.0)
+                                diff     = round(m_arba - m_mendez, 2)
+                                if diff != 0.0:
+                                    cuit_fmt = f"{ck[:2]}-{ck[2:10]}-{ck[10]}" if len(ck) == 11 else ck
+                                    
+                                    t_men = [x for x in mendez_detalle if str(x.get('CUIT','')).replace('-','') == ck]
+                                    t_arb = [x for x in arba_detalle_list if str(x.get('CUIT','')).replace('-','') == ck]
+                                    
+                                    prov = cuit_proveedor.get(ck, '')
+                                    
+                                    for t in t_arb:
+                                        t_copy = t.copy()
+                                        t_copy['CUIT'] = cuit_fmt
+                                        t_copy['Origen'] = 'ARBA'
+                                        lista_dif.append(t_copy)
+                                    for t in t_men:
+                                        t_copy = t.copy()
+                                        t_copy['CUIT'] = cuit_fmt
+                                        t_copy['Origen'] = 'MENDEZ'
+                                        lista_dif.append(t_copy)
+                                    
+                                    sub = {
+                                        'CUIT': cuit_fmt,
+                                        'Proveedor': prov,
+                                        'Fecha': '', 'Tipo Comp.': '', 'PV': '', 'Nro': '',
+                                        'Origen': 'DIFERENCIA CUIT:',
+                                        'Monto': diff
+                                    }
+                                    lista_dif.append(sub)
+
+                            df_matriz_dif = pd.DataFrame(lista_dif)[['CUIT', 'Proveedor', 'Origen', 'Fecha', 'Tipo Comp.', 'PV', 'Nro', 'Monto']] if lista_dif else pd.DataFrame()
+
+                            df_cruce      = pd.DataFrame(filas_cruce)
+                            df_mendez_det = pd.DataFrame(agregar_subtotales_cuit(mendez_detalle))
+                            df_arba_det   = pd.DataFrame(agregar_subtotales_cuit(arba_detalle_list))
+
+                            if df_mendez_det.empty:
+                                df_mendez_det = pd.DataFrame(columns=['CUIT', 'Proveedor', 'Fecha', 'Tipo Comp.', 'PV', 'Nro', 'Monto'])
+                            df_mendez_det['Estado'] = ''
+                            df_mendez_det['Cantidad'] = ''
+
+                            if df_arba_det.empty:
+                                df_arba_det = pd.DataFrame(columns=['CUIT', 'Proveedor', 'Fecha', 'Tipo Comp.', 'PV', 'Nro', 'Monto'])
+                            df_arba_det['Estado'] = ''
+                            df_arba_det['Cantidad'] = ''
+
+
+
+                        # ── 4. Stats ─────────────────────────────────────────────────
+                        total_ok    = (df_cruce['Estado'] == '✓ OK').sum()
+                        total_diff  = len(df_cruce) - total_ok
+                        monto_total_arba   = sum(r['monto'] for r in registros_activos)
+                        monto_total_mendez = sum(mendez_por_cuit.values())
+
+                        st.success(f"✓  Cruce ARBA · **{label_tipo}** completado")
+
+                        st.markdown(f"""
+                        <div class="stats-row">
+                            <div class="stat-chip">
+                                <span class="stat-val">{len(all_cuits):,}</span>
+                                <span class="stat-lbl">CUITs totales</span>
+                            </div>
+                            <div class="stat-chip">
+                                <span class="stat-val" style="color:#4ae8a0;">{total_ok:,}</span>
+                                <span class="stat-lbl">Sin diferencia</span>
+                            </div>
+                            <div class="stat-chip">
+                                <span class="stat-val" style="color:#f87171;">{total_diff:,}</span>
+                                <span class="stat-lbl">Con diferencia</span>
+                            </div>
+                            <div class="stat-chip">
+                                <span class="stat-val">{len(registros_activos):,}</span>
+                                <span class="stat-lbl">Reg. ARBA</span>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        # ── 5. Generar Excel de 3 hojas ──────────────────────────────
+                        with st.spinner("Generando Excel..."):
+                            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+                            from openpyxl.utils import get_column_letter
+
+                            output_cruce = io.BytesIO()
+                            with pd.ExcelWriter(output_cruce, engine='openpyxl') as writer:
+
+                                # — Helper estilos ——————————————————————————————————————
+                                HDR_FONT   = Font(bold=True, size=10, color='FFFFFF')
+                                CTR        = Alignment(horizontal='center', vertical='center', wrap_text=True)
+                                THIN       = Border(
+                                    left=Side(style='thin', color='252935'),
+                                    right=Side(style='thin', color='252935'),
+                                    top=Side(style='thin', color='252935'),
+                                    bottom=Side(style='thin', color='252935'),
+                                )
+                                FILL_TITLE = PatternFill('solid', fgColor='2F5496')
+                                FILL_HDR_P = PatternFill('solid', fgColor='7B2D8B')   # violeta percepciones
+                                FILL_HDR_R = PatternFill('solid', fgColor='C00000')   # rojo retenciones
+                                FILL_HDR   = FILL_HDR_P if tipo_default_arba != "R" else FILL_HDR_R
+                                FILL_OK    = PatternFill('solid', fgColor='E2EFDA')   # verde claro
+                                FILL_DIFF  = PatternFill('solid', fgColor='FCE4D6')   # rojo claro
+                                FILL_ZEBRA = PatternFill('solid', fgColor='F2F2F2')
+                                FMT_MONEY  = '#,##0.00;[Red]-#,##0.00'
+                                razon      = meta_arba.get('razon_social', 'CONTRIBUYENTE').upper()
+                                periodo    = meta_arba.get('periodo', '')
+
+                                def _encabezado(ws, n_cols, titulo2, info3):
+                                    lc = get_column_letter(n_cols)
+                                    ws.merge_cells(f'A1:{lc}1')
+                                    ws['A1'] = razon
+                                    ws['A1'].font = Font(bold=True, size=13, color='FFFFFF')
+                                    ws['A1'].fill = FILL_TITLE
+                                    ws['A1'].alignment = CTR
+                                    ws.row_dimensions[1].height = 22
+                                    ws.merge_cells(f'A2:{lc}2')
+                                    ws['A2'] = titulo2
+                                    ws['A2'].font = Font(bold=True, size=12, color='FFFFFF')
+                                    ws['A2'].fill = FILL_HDR
+                                    ws['A2'].alignment = CTR
+                                    ws.row_dimensions[2].height = 20
+                                    ws.merge_cells(f'A3:{lc}3')
+                                    ws['A3'] = info3
+                                    ws['A3'].font = Font(bold=True, size=10, color='2F5496')
+                                    ws['A3'].alignment = CTR
+                                    ws.row_dimensions[3].height = 16
+
+                                def _estilizar_hdr(ws, hdr_row, n_cols, fill=None):
+                                    f = fill or FILL_HDR
+                                    for c in range(1, n_cols + 1):
+                                        cell = ws.cell(row=hdr_row, column=c)
+                                        cell.font = HDR_FONT; cell.fill = f
+                                        cell.alignment = CTR; cell.border = THIN
+
+                                def _autofit_ws(ws, n_cols):
+                                    for c in range(1, n_cols + 1):
+                                        max_len = 0
+                                        col_letter = get_column_letter(c)
+                                        for row in ws.iter_rows(min_col=c, max_col=c):
+                                            for cell in row:
+                                                try:
+                                                    if cell.value:
+                                                        max_len = max(max_len, len(str(cell.value)))
+                                                except:
+                                                    pass
+                                        ws.column_dimensions[col_letter].width = min(max_len + 3, 40)
+
+                                # ══════ Hoja 1: CRUCE x CUIT (toda formulada) ══════════
+                                # Las hojas de detalle deben crearse ANTES para que las
+                                # referencias SUMIF/VLOOKUP funcionen
+                                CRUCE_HEADERS = [
+                                    'CUIT',
+                                    'Proveedor',
+                                    f'Total ARBA ({label_tipo})',
+                                    'Total Mendez',
+                                    'Diferencia (ARBA - Mendez)',
+                                    'Estado',
+                                ]
+                                n1 = len(CRUCE_HEADERS)
+                                last_arba_row = max(len(df_arba_det) + 5, 6)
+                                last_men_row  = max(len(df_mendez_det) + 5, 6)
+
+                                ws1 = writer.book.create_sheet('Cruce x CUIT', 0)
+                                _encabezado(ws1, n1,
+                                    f'CRUCE ARBA · {label_tipo.upper()}',
+                                    f'CUIT: {meta_arba.get("cuit_empresa","")} | {periodo} | {len(all_cuits)} CUITs'
+                                )
+                                ws1.row_dimensions[4].height = 4
+                                for c_i, h in enumerate(CRUCE_HEADERS, start=1):
+                                    cell = ws1.cell(row=5, column=c_i, value=h)
+                                    cell.font = HDR_FONT; cell.fill = FILL_HDR
+                                    cell.alignment = CTR; cell.border = THIN
+
+                                cuits_sorted = sorted(all_cuits)
+                                for row_i, ck in enumerate(cuits_sorted, start=6):
+                                    cuit_fmt = f"{ck[:2]}-{ck[2:10]}-{ck[10]}" if len(ck) == 11 else ck
+
+                                    # A: CUIT (valor estático)
+                                    ws1.cell(row_i, 1).value = cuit_fmt
+
+                                    # B: Proveedor → VLOOKUP desde Detalle Mendez, fallback Detalle ARBA
+                                    ws1.cell(row_i, 2).value = (
+                                        f"=IFERROR(VLOOKUP(A{row_i},'Detalle Mendez'!$A$6:$B${last_men_row},2,0),"
+                                        f"IFERROR(VLOOKUP(A{row_i},'Detalle ARBA'!$A$6:$B${last_arba_row},2,0),\"\"))"
+                                    )
+
+                                    # C: Total ARBA → SUMIFS Detalle ARBA excluyendo subtotal
+                                    ws1.cell(row_i, 3).value = (
+                                        f"=SUMIFS('Detalle ARBA'!$G$6:$G${last_arba_row},"
+                                        f"'Detalle ARBA'!$A$6:$A${last_arba_row},A{row_i},"
+                                        f"'Detalle ARBA'!$B$6:$B${last_arba_row},\"<>*(SUBTOTAL)*\")"
+                                    )
+                                    ws1.cell(row_i, 3).number_format = FMT_MONEY
+
+                                    # D: Total Mendez → SUMIFS Detalle Mendez excluyendo subtotal
+                                    ws1.cell(row_i, 4).value = (
+                                        f"=SUMIFS('Detalle Mendez'!$G$6:$G${last_men_row},"
+                                        f"'Detalle Mendez'!$A$6:$A${last_men_row},A{row_i},"
+                                        f"'Detalle Mendez'!$B$6:$B${last_men_row},\"<>*(SUBTOTAL)*\")"
+                                    )
+                                    ws1.cell(row_i, 4).number_format = FMT_MONEY
+
+
+                                    # E: Diferencia → =C-D
+                                    ws1.cell(row_i, 5).value = f'=C{row_i}-D{row_i}'
+                                    ws1.cell(row_i, 5).number_format = FMT_MONEY
+
+                                    # F: Estado → IF anidado
+                                    ws1.cell(row_i, 6).value = (
+                                        f'=IF(E{row_i}=0,"✓ OK",'
+                                        f'IF(D{row_i}=0,"⚠ Falta en Mendez",'
+                                        f'IF(C{row_i}=0,"⚠ Falta en ARBA","⚠ Diferencia")))'
+                                    )
+
+                                    # Estilar fila según diferencia calculada en Python
+                                    m_a = arba_por_cuit.get(ck, 0.0)
+                                    m_m = mendez_por_cuit.get(ck, 0.0)
+                                    fill_row = FILL_OK if round(m_a - m_m, 2) == 0.0 else FILL_DIFF
+                                    for c in range(1, n1 + 1):
+                                        cell = ws1.cell(row_i, c)
+                                        cell.fill = fill_row
+                                        cell.alignment = CTR
+                                        cell.border = THIN
+
+                                # Fila TOTAL GENERAL
+                                tot_row = len(cuits_sorted) + 6
+                                FILL_TOT = PatternFill('solid', fgColor='D9E1F2')
+                                for c_i in range(1, n1 + 1):
+                                    cell = ws1.cell(tot_row, c_i)
+                                    cell.fill = FILL_TOT; cell.border = THIN; cell.alignment = CTR
+                                ws1.cell(tot_row, 1).value = 'TOTAL GENERAL'
+                                ws1.cell(tot_row, 1).font = Font(bold=True, size=10)
+                                for c_i in (3, 4, 5):
+                                    col_l = get_column_letter(c_i)
+                                    cell = ws1.cell(tot_row, c_i)
+                                    cell.value = f'=SUM({col_l}6:{col_l}{tot_row-1})'
+                                    cell.number_format = FMT_MONEY
+                                    cell.font = Font(bold=True)
+                                ws1.row_dimensions[tot_row].height = 18
+                                _autofit_ws(ws1, n1)
+
+
+                                # ══════ Hoja 2: ANÁLISIS DIFERENCIAS ═══════════════════════════
+                                if not df_matriz_dif.empty:
+                                    df_matriz_dif.to_excel(writer, sheet_name='Análisis Diferencias', index=False, startrow=4)
+                                    ws_dif = writer.sheets['Análisis Diferencias']
+                                    n_dif = len(df_matriz_dif.columns)
+                                    _encabezado(ws_dif, n_dif,
+                                        'MATRIZ DE DIFERENCIAS',
+                                        f'Comprobantes enfrentados para CUITs con diferencias | {periodo}'
+                                    )
+                                    ws_dif.row_dimensions[4].height = 4
+                                    _estilizar_hdr(ws_dif, 5, n_dif, fill=PatternFill('solid', fgColor='C65911'))
+                                    
+                                    idx_m_dif = list(df_matriz_dif.columns).index('Monto') + 1
+                                    idx_orig  = list(df_matriz_dif.columns).index('Origen') + 1
+                                    
+                                    FILL_SUB_DIF = PatternFill('solid', fgColor='FCE4D6')
+                                    FILL_ARBA    = PatternFill('solid', fgColor='E1DFED') # light purple
+                                    FILL_MEN     = PatternFill('solid', fgColor='DDEBF7') # light blue
+
+                                    for row_i in range(6, len(df_matriz_dif) + 6):
+                                        origen = ws_dif.cell(row=row_i, column=idx_orig).value
+                                        is_sub = (origen == 'DIFERENCIA CUIT:')
+                                        fill = FILL_SUB_DIF if is_sub else (FILL_ARBA if origen == 'ARBA' else FILL_MEN)
+                                        
+                                        for c in range(1, n_dif + 1):
+                                            cell = ws_dif.cell(row=row_i, column=c)
+                                            cell.alignment = CTR
+                                            cell.border = THIN
+                                            if fill: cell.fill = fill
+                                            if is_sub: cell.font = Font(bold=True)
+                                            if c == idx_m_dif: cell.number_format = FMT_MONEY
+                                    _autofit_ws(ws_dif, n_dif)
+
+                                # ══════ Hoja 3: DETALLE ARBA ═══════════════════════════
+                                df_arba_det.to_excel(writer, sheet_name='Detalle ARBA', index=False, startrow=4)
+                                ws2 = writer.sheets['Detalle ARBA']
+                                n2 = len(df_arba_det.columns)
+                                _encabezado(ws2, n2,
+                                    f'DETALLE ARBA · {label_tipo.upper()}',
+                                    f'{len(registros_activos)} registros | {periodo}'
+                                )
+                                ws2.row_dimensions[4].height = 4
+                                _estilizar_hdr(ws2, 5, n2)
+                                
+                                idx_monto_arba = list(df_arba_det.columns).index('Monto') + 1
+                                idx_prov_arba  = list(df_arba_det.columns).index('Proveedor') + 1
+                                idx_match_arba = list(df_arba_det.columns).index('Estado') + 1
+                                idx_cant_arba  = list(df_arba_det.columns).index('Cantidad') + 1
+                                last_men_r     = max(len(mendez_detalle) + 6, 7) # aprox para countifs
+                                
+                                for row_i in range(6, len(df_arba_det) + 6):
+                                    is_sub = str(ws2.cell(row=row_i, column=idx_prov_arba).value).endswith('(SUBTOTAL)')
+                                    fill = FILL_ZEBRA if (row_i % 2 == 0) else None
+                                    if is_sub:
+                                        fill = PatternFill('solid', fgColor='D9E1F2')
+                                        ws2.row_dimensions[row_i].outlineLevel = 0
+                                    else:
+                                        ws2.row_dimensions[row_i].outlineLevel = 1
+                                    
+                                    # Formular 
+                                    if is_sub:
+                                        ws2.cell(row=row_i, column=idx_match_arba).value = (
+                                            f'=IFERROR(VLOOKUP(A{row_i}, \'Cruce x CUIT\'!$A$6:$F${len(cuits_sorted)+5}, 6, 0), "")'
+                                        )
+                                        ws2.cell(row=row_i, column=idx_cant_arba).value = (
+                                            f'=COUNTIFS($A$6:$A${len(df_arba_det)+5}, A{row_i}, $B$6:$B${len(df_arba_det)+5}, "<>*(SUBTOTAL)*")'
+                                        )
+                                    else:
+                                        ws2.cell(row=row_i, column=idx_match_arba).value = (
+                                            f'=IF(COUNTIFS(\'Detalle Mendez\'!$A:$A, A{row_i}, '
+                                            f'\'Detalle Mendez\'!$G:$G, G{row_i})>0, "✓ Ok", "⚠ Falta en Mendez")'
+                                        )
+
+                                    for c in range(1, n2 + 1):
+                                        cell = ws2.cell(row=row_i, column=c)
+                                        cell.alignment = CTR; cell.border = THIN
+                                        if fill: cell.fill = fill
+                                        if is_sub: cell.font = Font(bold=True)
+                                        if c == idx_monto_arba: cell.number_format = FMT_MONEY
+                                _autofit_ws(ws2, n2)
+
+
+                                # ══════ Hoja 4: DETALLE MENDEZ ══════════════════════════
+                                df_mendez_det.to_excel(writer, sheet_name='Detalle Mendez', index=False, startrow=4)
+                                ws3 = writer.sheets['Detalle Mendez']
+                                n3 = len(df_mendez_det.columns)
+                                _encabezado(ws3, n3,
+                                    'DETALLE MENDEZ · IIBB BS.AS.',
+                                    f'{len(mendez_detalle)} registros con percepción/retención Bs.As. | {periodo}'
+                                )
+                                ws3.row_dimensions[4].height = 4
+                                _estilizar_hdr(ws3, 5, n3, fill=PatternFill('solid', fgColor='2E75B6'))
+                                
+                                idx_monto_men = list(df_mendez_det.columns).index('Monto') + 1
+                                idx_prov_men  = list(df_mendez_det.columns).index('Proveedor') + 1
+                                idx_match_men = list(df_mendez_det.columns).index('Estado') + 1
+                                idx_cant_men  = list(df_mendez_det.columns).index('Cantidad') + 1
+                                
+                                for row_i in range(6, len(df_mendez_det) + 6):
+                                    is_sub = str(ws3.cell(row=row_i, column=idx_prov_men).value).endswith('(SUBTOTAL)')
+                                    fill = FILL_ZEBRA if (row_i % 2 == 0) else None
+                                    if is_sub:
+                                        fill = PatternFill('solid', fgColor='D9E1F2')
+                                        ws3.row_dimensions[row_i].outlineLevel = 0
+                                    else:
+                                        ws3.row_dimensions[row_i].outlineLevel = 1
+                                        
+                                    # Formula
+                                    if is_sub:
+                                        ws3.cell(row=row_i, column=idx_match_men).value = (
+                                            f'=IFERROR(VLOOKUP(A{row_i}, \'Cruce x CUIT\'!$A$6:$F${len(cuits_sorted)+5}, 6, 0), "")'
+                                        )
+                                        ws3.cell(row=row_i, column=idx_cant_men).value = (
+                                            f'=COUNTIFS($A$6:$A${len(df_mendez_det)+5}, A{row_i}, $B$6:$B${len(df_mendez_det)+5}, "<>*(SUBTOTAL)*")'
+                                        )
+                                    else:
+                                        ws3.cell(row=row_i, column=idx_match_men).value = (
+                                            f'=IF(COUNTIFS(\'Detalle ARBA\'!$A:$A, A{row_i}, '
+                                            f'\'Detalle ARBA\'!$G:$G, G{row_i})>0, "✓ Ok", "⚠ Falta en ARBA")'
+                                        )
+                                        
+                                    for c in range(1, n3 + 1):
+                                        cell = ws3.cell(row=row_i, column=c)
+                                        cell.alignment = CTR; cell.border = THIN
+                                        if fill: cell.fill = fill
+                                        if is_sub: cell.font = Font(bold=True)
+                                        if c == idx_monto_men: cell.number_format = FMT_MONEY
+                                _autofit_ws(ws3, n3)
+
+
+
+                            output_cruce.seek(0)
+
+                        # ── Descarga ─────────────────────────────────────────────────
+                        nombre_base = Path(uploaded_arba_txt_mendez.name).stem
+                        st.download_button(
+                            label="↓  Descargar Excel de Cruce ARBA",
+                            data=output_cruce,
+                            file_name=f"{nombre_base}_CruceARBA.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True,
+                        )
+
+            except Exception as e:
+                st.error(f"Error al procesar: {str(e)}")
+                st.exception(e)
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+
+    elif uploaded_arba_txt_mendez and not uploaded_arba_txt_arba:
+        st.markdown("""
+        <div style="
+            text-align: center;
+            padding: 2rem 1rem;
+            font-family: 'Space Mono', monospace;
+            font-size: 0.72rem;
+            color: #6b7280;
+            letter-spacing: 0.12em;
+        ">
+            FALTA EL TXT ARBA · SUBILO EN EL PASO 02
+        </div>
+        """, unsafe_allow_html=True)
+
+    elif not uploaded_arba_txt_mendez and uploaded_arba_txt_arba:
+        st.markdown("""
+        <div style="
+            text-align: center;
+            padding: 2rem 1rem;
+            font-family: 'Space Mono', monospace;
+            font-size: 0.72rem;
+            color: #6b7280;
+            letter-spacing: 0.12em;
+        ">
+            FALTA EL TXT MENDEZ · SUBILO EN EL PASO 01
+        </div>
+        """, unsafe_allow_html=True)
+
+    else:
+        st.markdown("""
+        <div style="
+            text-align: center;
+            padding: 2rem 1rem;
+            font-family: 'Space Mono', monospace;
+            font-size: 0.72rem;
+            color: #6b7280;
+            letter-spacing: 0.12em;
+        ">
+            SUBÍ AMBOS ARCHIVOS · TXT MENDEZ + TXT ARBA
         </div>
         """, unsafe_allow_html=True)
 

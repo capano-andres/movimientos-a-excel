@@ -1493,7 +1493,6 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
                 n for n, _ in _deducc_items
                 if 'RET' in n.upper()
                 and 'SIRCREB' not in n.upper()
-                and 'SIRTAC'  not in n.upper()
             }
 
             # --- Escribir hoja ---
