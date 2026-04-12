@@ -13,7 +13,7 @@
    - [Generadores de archivos regulatorios](#generadores-de-archivos-regulatorios)
 5. [Interfaz Web: `app.py`](#interfaz-web-apppy)
    - [Sistema de diseño CSS](#sistema-de-diseño-css)
-   - [Las 8 herramientas](#las-8-herramientas)
+   - [Las 9 herramientas](#las-9-herramientas)
 6. [Flujo de Datos Completo](#flujo-de-datos-completo)
 7. [Diagramas de Arquitectura](#diagramas-de-arquitectura)
 8. [Archivos Auxiliares](#archivos-auxiliares)
@@ -61,6 +61,7 @@ graph TD
         B --> H6["6. Deducciones XLS limpio"]
         B --> H7["7. Cruce Concepto TXT+XLS"]
         B --> H8["8. Papeles CM05"]
+        B --> H9["9. Cruce Deducciones TXT"]
     end
 
     subgraph "Backend - extractor_movimientos.py"
@@ -75,6 +76,7 @@ graph TD
     H4 --> P
     H7 --> P
     H8 --> P
+    H9 --> P
 ```
 
 ---
@@ -660,6 +662,25 @@ Herramienta para preparar los **Papeles de Trabajo del formulario CM05** (Conven
 
 > [!WARNING]
 > El post-procesamiento manipula la hoja directamente con openpyxl después de que `crear_excel()` la escribió. Al borrar columnas con `delete_cols()`, las celdas combinadas (merges) se rompen y hay que rehacerlas manualmente. También las fórmulas que referenciaban columnas borradas deben recalcularse.
+
+#### 9. Cruce de Deducciones
+
+[app.py:L2882-L3700](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L2882-L3700)
+
+Cruza y concilia los comprobantes de retenciones/percepciones fiscales originados en el **TXT del sistema (Mendez)** contra el **padrón o listado oficial del organismo (ARBA, AGIP, IVA)**. 
+
+**Proceso de Cruce (Modo Mensual):**
+1. Ingesta el TXT de Mendez y extrae la metadata (Mes y Año).
+2. Parsea el TXT oficial del organismo (actualmente ARBA, autodetectando la sección `PERCEPCIONES:` o `rETENCIONES:` según la selección en interfaz).
+3. Construye un diccionario acumulador por cada CUIT (sumando los importes asociados).
+4. Realiza validación cruzada y extrae razon social faltante desde `scraper` (CuitOnline) usando `requests`.
+5. Genera un archivo Excel (`openpyxl`) inteligente con 4 hojas:
+   - **Cruce x CUIT**: Listado global de diferencias sumadas y categorizadas.
+   - **Análisis Diferencias**: Zoom sobre los CUITs en rojo, informando si la plata "Falta en Mendez" o "Falta en ARBA".
+   - **Detalle [Organismo]** y **Detalle Mendez**: Desglose con fila por comprobante y subtotales agrupados usando la jerarquía (OutlineLevel) nativa de Excel y métricas `SUMIFS`/`COUNTIFS`.
+   
+> [!NOTE]
+> Las integraciones de AGIP, IVA y la temporalidad de `Varios Periodos` se encuentran en desarrollo y actualmente están ocultas bajo advertencia intercativa (`st.info()`).
 
 ---
 
