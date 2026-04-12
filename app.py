@@ -3588,7 +3588,7 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                         monto_total_arba   = sum(r['monto'] for r in registros_activos)
                         monto_total_mendez = sum(mendez_por_cuit.values())
 
-                        st.success(f"✓  Cruce ARBA · **{label_tipo}** completado")
+                        st.success(f"✓  Cruce {organismo} · **{label_tipo}** completado")
 
                         st.markdown(f"""
                         <div class="stats-row">
@@ -3606,7 +3606,7 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                             </div>
                             <div class="stat-chip">
                                 <span class="stat-val">{len(registros_activos):,}</span>
-                                <span class="stat-lbl">Reg. ARBA</span>
+                                <span class="stat-lbl">Reg. {organismo}</span>
                             </div>
                         </div>
                         """, unsafe_allow_html=True)
