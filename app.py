@@ -3503,8 +3503,8 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                         'Fecha':      fecha_fmt,
                                         'Tipo Comp.': t.get('Tipo', ''),
 
-                                        'PV':         pv_m,
-                                        'Nro':        nro_m,
+                                        'PV':         int(pv_m) if str(pv_m).isdigit() else pv_m,
+                                        'Nro':        int(nro_m) if str(nro_m).isdigit() else nro_m,
                                         'Monto':      round(monto_bsas, 2),
                                     })
 
@@ -3614,15 +3614,17 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 'Proveedor':  cuit_proveedor.get(r['cuit_limpio'], ''),
                                 'Fecha':      r['fecha'],
                                 'Tipo Comp.': r['tipo_comp'],
-                                'PV':         r['pv_norm'],
-                                'Nro':        r['nro_norm'],
+                                'PV':         int(r['pv_norm']) if str(r['pv_norm']).isdigit() else r['pv_norm'],
+                                'Nro':        int(r['nro_norm']) if str(r['nro_norm']).isdigit() else r['nro_norm'],
                                 'Monto':      r['monto'],
                             } for r in registros_activos]
 
                             # -------------------------------------------------------------
-                            # Matriz de Diferencias (Hoja orientada a conciliación rápida)
+                            # Matriz de Diferencias (Separada por Mendez y Organismo)
                             # -------------------------------------------------------------
-                            lista_dif = []
+                            lista_m_dif = []
+                            lista_a_dif = []
+                            
                             for ck in sorted(all_cuits):
                                 m_mendez = mendez_por_cuit.get(ck, 0.0)
                                 m_arba   = arba_por_cuit.get(ck, 0.0)
@@ -3633,29 +3635,19 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                     t_men = [x for x in mendez_detalle if str(x.get('CUIT','')).replace('-','') == ck]
                                     t_arb = [x for x in arba_detalle_list if str(x.get('CUIT','')).replace('-','') == ck]
                                     
-                                    prov = cuit_proveedor.get(ck, '')
+                                    for t in t_men:
+                                        t_copy = t.copy()
+                                        t_copy['CUIT'] = cuit_fmt
+                                        lista_m_dif.append(t_copy)
                                     
                                     for t in t_arb:
                                         t_copy = t.copy()
                                         t_copy['CUIT'] = cuit_fmt
-                                        t_copy['Origen'] = f'{organismo}'
-                                        lista_dif.append(t_copy)
-                                    for t in t_men:
-                                        t_copy = t.copy()
-                                        t_copy['CUIT'] = cuit_fmt
-                                        t_copy['Origen'] = 'MENDEZ'
-                                        lista_dif.append(t_copy)
-                                    
-                                    sub = {
-                                        'CUIT': cuit_fmt,
-                                        'Proveedor': prov,
-                                        'Fecha': '', 'Tipo Comp.': '', 'PV': '', 'Nro': '',
-                                        'Origen': 'DIFERENCIA CUIT:',
-                                        'Monto': diff
-                                    }
-                                    lista_dif.append(sub)
+                                        lista_a_dif.append(t_copy)
 
-                            df_matriz_dif = pd.DataFrame(lista_dif)[['CUIT', 'Proveedor', 'Origen', 'Fecha', 'Tipo Comp.', 'PV', 'Nro', 'Monto']] if lista_dif else pd.DataFrame()
+                            cols_out = ['CUIT', 'Proveedor', 'Fecha', 'Tipo Comp.', 'PV', 'Nro', 'Monto']
+                            df_mas_mendez = pd.DataFrame(lista_m_dif)[cols_out] if lista_m_dif else pd.DataFrame(columns=cols_out)
+                            df_mas_org    = pd.DataFrame(lista_a_dif)[cols_out] if lista_a_dif else pd.DataFrame(columns=cols_out)
 
                             df_cruce      = pd.DataFrame(filas_cruce)
                             df_mendez_det = pd.DataFrame(agregar_subtotales_cuit(mendez_detalle))
@@ -3726,7 +3718,7 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 FILL_OK    = PatternFill('solid', fgColor='E2EFDA')   # verde claro
                                 FILL_DIFF  = PatternFill('solid', fgColor='FCE4D6')   # rojo claro
                                 FILL_ZEBRA = PatternFill('solid', fgColor='F2F2F2')
-                                FMT_MONEY  = '#,##0.00;[Red]-#,##0.00'
+                                FMT_MONEY  = '_-"$"* #,##0.00_-;[Red]-"$"* #,##0.00_-;_-"$"* "-"??_-;_-@_-'
                                 razon      = meta_arba.get('razon_social', 'CONTRIBUYENTE').upper()
                                 periodo    = meta_arba.get('periodo', '')
 
@@ -3876,54 +3868,96 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 ws1.conditional_formatting.add(f'A6:F{len(cuits_sorted)+5}', f_fal_org)
                                 ws1.conditional_formatting.add(f'A6:F{len(cuits_sorted)+5}', f_fal_men)
                                 
+                                # ══════ Hoja 2: DE MAS EN MENDEZ ═══════════════════════════
+                                if not df_mas_mendez.empty:
+                                    df_mas_mendez.to_excel(writer, sheet_name='DE MAS EN MENDEZ', index=False, startrow=4)
+                                    ws_mas_m = writer.sheets['DE MAS EN MENDEZ']
+                                    n_mas_m = len(df_mas_mendez.columns)
+                                    _encabezado(ws_mas_m, n_mas_m,
+                                        'DE MAS EN MENDEZ',
+                                        f'Comprobantes enfrentados para CUITs con diferencias | {periodo}'
+                                    )
+                                    ws_mas_m.row_dimensions[4].height = 4
+                                    _estilizar_hdr(ws_mas_m, 5, n_mas_m, fill=PatternFill('solid', fgColor='C00000'))
+                                    
+                                    idx_m_mas_m = list(df_mas_mendez.columns).index('Monto') + 1
+
+                                    for row_i in range(6, len(df_mas_mendez) + 6):
+                                        fill = FILL_ZEBRA if (row_i % 2 == 0) else None
+                                        
+                                        for c in range(1, n_mas_m + 1):
+                                            cell = ws_mas_m.cell(row=row_i, column=c)
+                                            cell.alignment = CTR
+                                            cell.border = THIN
+                                            if fill: cell.fill = fill
+                                            if c == idx_m_mas_m: cell.number_format = FMT_MONEY
+                                            
+                                    tot_row_m = len(df_mas_mendez) + 6
+                                    ws_mas_m.cell(row=tot_row_m, column=1).value = 'TOTAL'
+                                    ws_mas_m.cell(row=tot_row_m, column=1).font = Font(bold=True)
+                                    ws_mas_m.cell(row=tot_row_m, column=1).alignment = CTR
+                                    for c in range(1, n_mas_m + 1):
+                                        c_cel = ws_mas_m.cell(row=tot_row_m, column=c)
+                                        c_cel.fill = PatternFill('solid', fgColor='D9E1F2')
+                                        c_cel.border = THIN
+                                    
+                                    col_m_l = get_column_letter(idx_m_mas_m)
+                                    cel_t_m = ws_mas_m.cell(row=tot_row_m, column=idx_m_mas_m)
+                                    cel_t_m.value = f'=SUM({col_m_l}6:{col_m_l}{tot_row_m-1})'
+                                    cel_t_m.number_format = FMT_MONEY
+                                    cel_t_m.font = Font(bold=True)
+                                    cel_t_m.alignment = CTR
+                                    
+                                    _autofit_ws(ws_mas_m, n_mas_m)
+
+                                # ══════ Hoja 2.5: DE MAS EN ORGANISMO ═══════════════════════════
+                                if not df_mas_org.empty:
+                                    hoja_org_name = f'DE MAS EN {organismo[:10]}'
+                                    df_mas_org.to_excel(writer, sheet_name=hoja_org_name, index=False, startrow=4)
+                                    ws_mas_o = writer.sheets[hoja_org_name]
+                                    n_mas_o = len(df_mas_org.columns)
+                                    _encabezado(ws_mas_o, n_mas_o,
+                                        f'DE MAS EN {organismo}',
+                                        f'Comprobantes enfrentados para CUITs con diferencias | {periodo}'
+                                    )
+                                    ws_mas_o.row_dimensions[4].height = 4
+                                    _estilizar_hdr(ws_mas_o, 5, n_mas_o, fill=PatternFill('solid', fgColor='C00000'))
+                                    
+                                    idx_m_mas_o = list(df_mas_org.columns).index('Monto') + 1
+
+                                    for row_i in range(6, len(df_mas_org) + 6):
+                                        fill = FILL_ZEBRA if (row_i % 2 == 0) else None
+                                        
+                                        for c in range(1, n_mas_o + 1):
+                                            cell = ws_mas_o.cell(row=row_i, column=c)
+                                            cell.alignment = CTR
+                                            cell.border = THIN
+                                            if fill: cell.fill = fill
+                                            if c == idx_m_mas_o: cell.number_format = FMT_MONEY
+                                            
+                                    tot_row_o = len(df_mas_org) + 6
+                                    ws_mas_o.cell(row=tot_row_o, column=1).value = 'TOTAL'
+                                    ws_mas_o.cell(row=tot_row_o, column=1).font = Font(bold=True)
+                                    ws_mas_o.cell(row=tot_row_o, column=1).alignment = CTR
+                                    for c in range(1, n_mas_o + 1):
+                                        c_cel = ws_mas_o.cell(row=tot_row_o, column=c)
+                                        c_cel.fill = PatternFill('solid', fgColor='D9E1F2')
+                                        c_cel.border = THIN
+                                    
+                                    col_o_l = get_column_letter(idx_m_mas_o)
+                                    cel_t_o = ws_mas_o.cell(row=tot_row_o, column=idx_m_mas_o)
+                                    cel_t_o.value = f'=SUM({col_o_l}6:{col_o_l}{tot_row_o-1})'
+                                    cel_t_o.number_format = FMT_MONEY
+                                    cel_t_o.font = Font(bold=True)
+                                    cel_t_o.alignment = CTR
+                                    
+                                    _autofit_ws(ws_mas_o, n_mas_o)
+                                
                                 # Añadir formato condicional amarillo a diferencias
 
 
 
 
-                                # ══════ Hoja 2: ANÁLISIS DIFERENCIAS ═══════════════════════════
-                                if not df_matriz_dif.empty:
-                                    df_matriz_dif.to_excel(writer, sheet_name='Análisis Diferencias', index=False, startrow=4)
-                                    ws_dif = writer.sheets['Análisis Diferencias']
-                                    n_dif = len(df_matriz_dif.columns)
-                                    _encabezado(ws_dif, n_dif,
-                                        'DIFERENCIAS',
-                                        f'Comprobantes enfrentados para CUITs con diferencias | {periodo}'
-                                    )
-                                    ws_dif.row_dimensions[4].height = 4
-                                    _estilizar_hdr(ws_dif, 5, n_dif, fill=PatternFill('solid', fgColor='C65911'))
-                                    
-                                    idx_m_dif = list(df_matriz_dif.columns).index('Monto') + 1
-                                    idx_orig  = list(df_matriz_dif.columns).index('Origen') + 1
-                                    
-                                    FILL_SUB_DIF = PatternFill('solid', fgColor='FCE4D6')
-                                    FILL_ARBA    = PatternFill('solid', fgColor='E1DFED') # light purple
-                                    FILL_MEN     = PatternFill('solid', fgColor='DDEBF7') # light blue
-
-                                    for row_i in range(6, len(df_matriz_dif) + 6):
-                                        origen = ws_dif.cell(row=row_i, column=idx_orig).value
-                                        cuit_val = str(ws_dif.cell(row=row_i, column=1).value).replace("-", "")
-                                        
-                                        m_a = arba_por_cuit.get(cuit_val, 0)
-                                        m_m = mendez_por_cuit.get(cuit_val, 0)
-                                        
-                                        is_sub = (origen == 'DIFERENCIA CUIT:')
-                                        
-                                        if is_sub: 
-                                            fill = PatternFill('solid', fgColor='FF9999') # Rojo más notorio
-                                        elif origen == 'MENDEZ': 
-                                            fill = PatternFill('solid', fgColor='F8CBAD') # Naranja claro
-                                        else: 
-                                            fill = PatternFill('solid', fgColor='FFF2CC') # Amarillo claro (AGIP/ARBA)
-                                        
-                                        for c in range(1, n_dif + 1):
-                                            cell = ws_dif.cell(row=row_i, column=c)
-                                            cell.alignment = CTR
-                                            cell.border = THIN
-                                            if fill: cell.fill = fill
-                                            if is_sub: cell.font = Font(bold=True)
-                                            if c == idx_m_dif: cell.number_format = FMT_MONEY
-                                    _autofit_ws(ws_dif, n_dif)
 
                                 # ══════ Hoja 3: DETALLE ARBA ═══════════════════════════
                                 df_arba_det.to_excel(writer, sheet_name=f'Detalle {organismo}', index=False, startrow=4)
