@@ -539,7 +539,7 @@ La aplicación tiene un tema oscuro personalizado ("dark mode premium") con vari
 
 ---
 
-### Las 8 herramientas
+### Las 9 herramientas
 
 #### 1. Listado por fecha TXT Mendez a Excel limpio
 
@@ -676,22 +676,70 @@ Herramienta para preparar los **Papeles de Trabajo del formulario CM05** (Conven
 
 #### 9. Cruce de Deducciones
 
-[app.py:L2882-L3700](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L2882-L3700)
+[app.py:L2992-L4185](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L2992-L4185)
 
-Cruza y concilia los comprobantes de retenciones/percepciones fiscales originados en el **TXT del sistema (Mendez)** contra el **padrón o listado oficial del organismo (ARBA, AGIP, IVA)**. 
+Cruza y concilia los comprobantes de retenciones/percepciones fiscales originados en el **TXT del sistema (Mendez)** contra el **padrón o listado oficial del organismo (ARBA, AGIP o IVA/ARCA)**.
 
-**Proceso de Cruce (Modo Mensual):**
-1. Ingesta el TXT de Mendez y extrae la metadata (Mes y Año).
-2. Parsea el TXT oficial del organismo (actualmente ARBA, autodetectando la sección `PERCEPCIONES:` o `rETENCIONES:` según la selección en interfaz).
-3. Construye un diccionario acumulador por cada CUIT (sumando los importes asociados).
-4. Realiza validación cruzada y extrae razon social faltante desde `scraper` (CuitOnline) usando `requests`.
-5. Genera un archivo Excel (`openpyxl`) inteligente con 4 hojas:
-   - **Cruce x CUIT**: Listado global de diferencias sumadas y categorizadas.
-   - **Análisis Diferencias**: Zoom sobre los CUITs en rojo, informando si la plata "Falta en Mendez" o "Falta en ARBA".
-   - **Detalle [Organismo]** y **Detalle Mendez**: Desglose con fila por comprobante y subtotales agrupados usando la jerarquía (OutlineLevel) nativa de Excel y métricas `SUMIFS`/`COUNTIFS`.
-   
-> [!NOTE]
-> Las integraciones de AGIP, IVA y la temporalidad de `Varios Periodos` se encuentran en desarrollo y actualmente están ocultas bajo advertencia intercativa (`st.info()`).
+**Organismos soportados:**
+
+| Organismo | Archivo de entrada | Parser |
+|-----------|-------------------|--------|
+| **ARBA** | TXT posicional (71 chars/línea) | `parsear_arba_iibb()` [L3201](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L3201) |
+| **AGIP** | CSV con columnas estándar | `parsear_agip_iibb()` [L3016](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L3016) |
+| **IVA** | XLS de Mis Retenciones ARCA | `parsear_iva_xls()` [L3111](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L3111) |
+
+**Proceso de Cruce:**
+1. Parsea el TXT Mendez y extrae el mes/año del período.
+2. Parsea el archivo del organismo según el tipo seleccionado.
+3. Filtra las deducciones de Mendez que corresponden al organismo usando keywords (`kw_mendez`) y exclusiones (`excl_mendez`) configuradas por organismo y tipo (Percepciones/Retenciones).
+4. Acumula montos por CUIT desde ambas fuentes → `mendez_por_cuit`, `arba_por_cuit`.
+5. Para ARBA: busca razones sociales faltantes en CuitOnline via `requests`.
+6. Aplica **cancelación multiset por monto**: para cada CUIT con diferencia, empareja los comprobantes que tienen el mismo importe en ambas fuentes y los cancela. Los que no tienen contraparte quedan en `lista_m_dif` (sobrantes en Mendez) o `lista_a_dif` (sobrantes en el organismo).
+7. Genera Excel con hasta **5 hojas**:
+
+| Hoja | Contenido | Condición |
+|------|-----------|-----------|
+| **Cruce x CUIT** | Tabla resumen: Total organismo vs Total Mendez, Diferencia, Estado por CUIT | Siempre |
+| **Detalle [Organismo]** | Fila por comprobante del organismo con columna Estado (VLOOKUP a Cruce x CUIT) | Siempre |
+| **Detalle Mendez** | Fila por comprobante de Mendez con columna Estado | Siempre |
+| **DE MAS EN MENDEZ** | Mini-tablas por CUIT de comprobantes en Mendez sin contraparte en el organismo | Solo si hay diferencias |
+| **DE MAS EN [ORGANISMO]** | Mini-tablas por CUIT de comprobantes del organismo sin contraparte en Mendez | Solo si hay diferencias |
+
+**Hojas DE MAS — formato de mini-tabla por CUIT** (`_escribir_por_cuit()` [L3912](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L3912)):
+
+Cada CUIT con comprobantes sin cancelar recibe su propia mini-tabla:
+```
+┌─────────────────────────────────────────────────────────┐  ← encabezado rojo
+│ CUIT │ Proveedor │ Fecha │ Tipo Comp. │ PV │ Nro │ Monto│
+├─────────────────────────────────────────────────────────┤
+│ ...  │ ...       │  ...  │    ...     │ .. │ ... │  ... │  ← filas zebra
+│ TOTAL│           │       │            │    │     │=SUM()│  ← fila azul + fórmula
+└─────────────────────────────────────────────────────────┘
+```
+
+**Parser ARBA — detección automática de formato CR** (`parsear_arba_iibb()` [L3265](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L3265)):
+
+ARBA emite dos variantes del TXT de retenciones. El parser las distingue automáticamente línea a línea:
+
+| Formato | Posición [55:] | Detección |
+|---------|---------------|-----------|
+| **Estándar** | `000000628790,62` (monto directo) | Tiene coma en los primeros 20 chars |
+| **CR** (Constancias de Retención) | `00000000000000020912000000628790,62` | Primeros 20 chars son todos dígitos sin coma → se descartan |
+
+```python
+# Auto-detección formato CR
+if len(monto_s) > 20 and monto_s[:20].isdigit() and ',' not in monto_s[:20]:
+    monto_s = monto_s[20:]   # saltar nro_constancia
+```
+
+**Estados del Cruce x CUIT:**
+
+| Estado | Significado | Color |
+|--------|-------------|-------|
+| `✓ OK` | Totales idénticos | Verde |
+| `⚠ Diferencia` | Ambos tienen montos pero no coinciden | Amarillo |
+| `⚠ Falta en Mendez` | El organismo tiene el CUIT pero Mendez no | Naranja |
+| `⚠ Falta en {organismo}` | Mendez tiene el CUIT pero el organismo no | Rojo |
 
 ---
 
@@ -768,9 +816,9 @@ Excluye el directorio `venv/` y archivos de caché Python del control de version
 
 | Métrica | Valor |
 |---------|-------|
-| Líneas totales de código | **5,267** (app.py: 2,853 + extractor: 2,414) |
-| Herramientas de la UI | **8** |
-| Hojas Excel posibles | **11** (Movimientos + 6 resúmenes + Asiento + ARCA + overflow ×2) |
+| Líneas totales de código | **~6,600** (app.py: ~4,185 + extractor: 2,414) |
+| Herramientas de la UI | **9** |
+| Hojas Excel posibles | **13** (Movimientos + 6 resúmenes + Asiento + ARCA + overflow ×2 + DE MAS ×2) |
 | Conceptos contables mapeados | **~200** |
 | Tasas IVA soportadas | **~22** variantes (incluyendo abreviaciones) |
 | Deducciones mapeadas | **~26** percepciones/retenciones |

@@ -3268,6 +3268,14 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                 if len(fecha_s) < 10 or '/' not in fecha_s:
                     continue
 
+                # Detectar formato CR (Constancias de Retención ARBA): tiene un campo
+                # extra de 20 dígitos (nro_constancia) antes del importe real.
+                # Ejemplo: "00000000000000020912000000628790,62"
+                #           ←── 20 dígitos ──→←── monto ────→
+                # Si los primeros 20 chars son todos dígitos sin coma → es formato CR.
+                if len(monto_s) > 20 and monto_s[:20].isdigit() and ',' not in monto_s[:20]:
+                    monto_s = monto_s[20:]
+
                 # Convertir monto: quitar signo si es negativo, normalizar coma→punto
                 signo = -1 if monto_s.startswith('-') else 1
                 monto_limpio = monto_s.lstrip('-').replace('.', '').replace(',', '.')
@@ -3576,7 +3584,7 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 elif m_mendez == 0.0:
                                     estado = "⚠ Falta en Mendez"
                                 elif m_arba == 0.0:
-                                    estado = "⚠ Falta en ARBA"
+                                    estado = f"⚠ Falta en {organismo}"
                                 else:
                                     estado = "⚠ Diferencia"
                                 filas_cruce.append({
@@ -3972,20 +3980,20 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                     _autofit_ws(ws, n_dif)
 
                                 if lista_m_dif:
-                                    ws_mas_m = writer.book.create_sheet('DE MAS EN MENDEZ')
+                                    ws_mas_m = writer.book.create_sheet('DE MAS EN MENDEZ(CONTROLAR)')
                                     _escribir_por_cuit(
                                         ws_mas_m, lista_m_dif,
-                                        'DE MAS EN MENDEZ',
+                                        'DE MAS EN MENDEZ(CONTROLAR)',
                                         f'Comprobantes enfrentados para CUITs con diferencias | {periodo}'
                                     )
 
                                 # ══════ Hoja 2.5: DE MAS EN ORGANISMO ═══════════════════════════
                                 if lista_a_dif:
-                                    hoja_org_name = f'DE MAS EN {label_organismo[:10]}'
+                                    hoja_org_name = f'DE MAS EN {label_organismo[:10]}(PROCESAR)'
                                     ws_mas_o = writer.book.create_sheet(hoja_org_name)
                                     _escribir_por_cuit(
                                         ws_mas_o, lista_a_dif,
-                                        f'DE MAS EN {label_organismo}',
+                                        f'DE MAS EN {label_organismo}(PROCESAR)',
                                         f'Comprobantes enfrentados para CUITs con diferencias | {periodo}'
                                     )
 
