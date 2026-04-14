@@ -3112,24 +3112,33 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
         import pandas as pd
         import io
         
-        df = pd.read_excel(io.BytesIO(iva_content))
+        # dtype=str: evita que pandas convierta números grandes a float (notación científica en Nro)
+        df = pd.read_excel(io.BytesIO(iva_content), dtype=str)
+        df = df.fillna('')
         
         percepciones = []
         retenciones = []
         
         cols_map = {}
+        # Pasada 1: criterios estrictos (busca la palabra 'comprobante' en el nombre)
         for c in df.columns:
             c_low = str(c).lower().strip()
             if 'cuit' in c_low: cols_map['cuit'] = c
             elif 'fecha' in c_low and 'comprobante' in c_low: cols_map['fecha'] = c
-            elif 'n' in c_low and 'comprobante' in c_low: cols_map['nro'] = c
-            elif 'tipo' in c_low and 'comprobante' in c_low: cols_map['tipo_comp'] = c 
-            elif 'importe' in c_low: cols_map['monto'] = c 
+            elif ('tipo' in c_low or 'descripci' in c_low) and 'comprobante' in c_low: cols_map['tipo_comp'] = c
+            elif ('nro' in c_low or 'n°' in c_low or 'numero' in c_low or 'número' in c_low) and 'comprobante' in c_low: cols_map['nro'] = c
+            elif 'importe' in c_low: cols_map['monto'] = c
             elif 'razon social' in c_low or 'denominaci' in c_low: cols_map['razon_social'] = c
             elif 'operaci' in c_low: cols_map['operacion'] = c
-            
+        # Pasada 2: fallback para columnas sin 'comprobante' (ej: 'Tipo', 'Nro', 'Fecha')
+        for c in df.columns:
+            c_low = str(c).lower().strip()
+            if 'fecha' not in cols_map and 'fecha' in c_low: cols_map['fecha'] = c
+            elif 'tipo_comp' not in cols_map and c_low.startswith('tipo'): cols_map['tipo_comp'] = c
+            elif 'nro' not in cols_map and ('nro' in c_low or 'n°' in c_low or 'numero' in c_low or 'número' in c_low): cols_map['nro'] = c
+
         for idx, row in df.iterrows():
-            cuit_raw = str(row.get(cols_map.get('cuit', 'CUIT'), ''))
+            cuit_raw = str(row.get(cols_map.get('cuit', 'CUIT'), '')).strip()
             cuit_limpio = cuit_raw.replace('-', '').replace('.0', '').strip()
             if not cuit_limpio or cuit_limpio == 'nan':
                 continue
@@ -3137,29 +3146,34 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
             if len(cuit_limpio) == 11 and '-' not in cuit_raw:
                 cuit_raw = f"{cuit_limpio[:2]}-{cuit_limpio[2:10]}-{cuit_limpio[10]}"
             
-            monto_val = row.get(cols_map.get('monto', 'Importe'), 0)
-            if isinstance(monto_val, str):
-                monto_val = monto_val.replace('.', '').replace(',', '.') if ',' in monto_val else monto_val
-            monto_f = float(monto_val or 0)
+            # Monto: viene como str por dtype=str, convertir a float manualmente
+            monto_str = str(row.get(cols_map.get('monto', 'Importe'), '0')).strip()
+            monto_str = monto_str.replace('.', '').replace(',', '.') if ',' in monto_str else monto_str
+            try:
+                monto_f = float(monto_str or 0)
+            except ValueError:
+                monto_f = 0.0
             
             op_raw = str(row.get(cols_map.get('operacion', 'Operacion'), 'PERCEPCION'))
             seccion = "R" if 'reten' in op_raw.lower() else "P"
             
-            rz = str(row.get(cols_map.get('razon_social', 'Razon Social'), ''))
-            fecha_s = str(row.get(cols_map.get('fecha', 'Fecha'), ''))
+            rz = str(row.get(cols_map.get('razon_social', 'Razon Social'), '')).strip()
+            fecha_s = str(row.get(cols_map.get('fecha', 'Fecha'), '')).strip()
             
-            nro_m = str(row.get(cols_map.get('nro', 'Nro'), ''))
-            tipo_c = str(row.get(cols_map.get('tipo_comp', 'Tipo'), ''))
+            # Nro: viene como str limpio (sin notación científica gracias a dtype=str)
+            nro_m = str(row.get(cols_map.get('nro', 'Nro'), '')).strip()
+            tipo_c = str(row.get(cols_map.get('tipo_comp', 'Tipo'), '')).strip()
             
             pv_norm = "0"
-            nro_norm = nro_m.strip()
+            nro_norm = nro_m
             try:
                 if '-' in nro_norm:
                     pv_norm = str(int(nro_norm.split('-')[0]))
                     nro_norm = str(int(nro_norm.split('-')[1]))
-                else:
+                elif nro_norm and nro_norm not in ('', 'nan'):
+                    # Puede venir como "1234.0" si quedó algo de float
                     nro_norm = str(int(float(nro_norm)))
-            except ValueError:
+            except (ValueError, OverflowError):
                 pass
                 
             registro = {
@@ -3172,7 +3186,7 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                 'pv_norm':     pv_norm,
                 'nro':         nro_m,
                 'nro_norm':    nro_norm,
-                'tipo_comp':   tipo_c.strip(),
+                'tipo_comp':   tipo_c,
                 'monto':       monto_f,
                 'razon_social': rz
             }
@@ -3364,6 +3378,9 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                             iva_content = uploaded_arba_txt_arba.getvalue()
                             arba_data    = parsear_iva_xls(iva_content)
 
+                    # Alias de visualización: IVA → ARCA en títulos y nombres de hojas
+                    label_organismo = "ARCA" if organismo == "IVA" else organismo
+
                     percepciones = arba_data['percepciones']
                     retenciones  = arba_data['retenciones']
                     registros_activos = percepciones + retenciones
@@ -3527,7 +3544,7 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                             for r in registros_activos:
                                 ck = r['cuit_limpio']
                                 if ck not in cuit_proveedor and r.get('razon_social'):
-                                    cuit_proveedor[ck] = r['razon_social'] + f" ({organismo})"
+                                    cuit_proveedor[ck] = r['razon_social']
 
                             # Buscar en CuitOnline los CUITs que no están en Mendez ni en el Padrón
                             cuits_faltantes = [ck for ck in arba_por_cuit.keys() if ck not in cuit_proveedor]
@@ -3631,19 +3648,42 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 diff     = round(m_arba - m_mendez, 2)
                                 if diff != 0.0:
                                     cuit_fmt = f"{ck[:2]}-{ck[2:10]}-{ck[10]}" if len(ck) == 11 else ck
-                                    
+
                                     t_men = [x for x in mendez_detalle if str(x.get('CUIT','')).replace('-','') == ck]
                                     t_arb = [x for x in arba_detalle_list if str(x.get('CUIT','')).replace('-','') == ck]
-                                    
+
+                                    # Cancelar importes que coincidan en ambos lados (multiset)
+                                    from collections import Counter
+                                    montos_men = Counter(round(x.get('Monto', 0), 2) for x in t_men)
+                                    montos_arb = Counter(round(x.get('Monto', 0), 2) for x in t_arb)
+                                    cancelados_men = Counter()
+                                    cancelados_arb = Counter()
+                                    for monto, cnt_m in montos_men.items():
+                                        cnt_a = montos_arb.get(monto, 0)
+                                        cancelados = min(cnt_m, cnt_a)
+                                        cancelados_men[monto] = cancelados
+                                        cancelados_arb[monto] = cancelados
+
+                                    usados_men = Counter()
                                     for t in t_men:
+                                        m = round(t.get('Monto', 0), 2)
+                                        if usados_men[m] < cancelados_men[m]:
+                                            usados_men[m] += 1
+                                            continue  # cancelado
                                         t_copy = t.copy()
                                         t_copy['CUIT'] = cuit_fmt
                                         lista_m_dif.append(t_copy)
-                                    
+
+                                    usados_arb = Counter()
                                     for t in t_arb:
+                                        m = round(t.get('Monto', 0), 2)
+                                        if usados_arb[m] < cancelados_arb[m]:
+                                            usados_arb[m] += 1
+                                            continue  # cancelado
                                         t_copy = t.copy()
                                         t_copy['CUIT'] = cuit_fmt
                                         lista_a_dif.append(t_copy)
+
 
                             cols_out = ['CUIT', 'Proveedor', 'Fecha', 'Tipo Comp.', 'PV', 'Nro', 'Monto']
                             df_mas_mendez = pd.DataFrame(lista_m_dif)[cols_out] if lista_m_dif else pd.DataFrame(columns=cols_out)
@@ -3869,102 +3909,99 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 ws1.conditional_formatting.add(f'A6:F{len(cuits_sorted)+5}', f_fal_men)
                                 
                                 # ══════ Hoja 2: DE MAS EN MENDEZ ═══════════════════════════
-                                if not df_mas_mendez.empty:
-                                    df_mas_mendez.to_excel(writer, sheet_name='DE MAS EN MENDEZ', index=False, startrow=4)
-                                    ws_mas_m = writer.sheets['DE MAS EN MENDEZ']
-                                    n_mas_m = len(df_mas_mendez.columns)
-                                    _encabezado(ws_mas_m, n_mas_m,
+                                def _escribir_por_cuit(ws, lista_dif, titulo, subtitulo):
+                                    """Escribe mini-tablas por CUIT: encabezado rojo + datos + TOTAL + fila vacía."""
+                                    COLS_DIF  = ['CUIT', 'Proveedor', 'Fecha', 'Tipo Comp.', 'PV', 'Nro', 'Monto']
+                                    n_dif     = len(COLS_DIF)
+                                    idx_monto = COLS_DIF.index('Monto') + 1
+                                    idx_nro   = COLS_DIF.index('Nro') + 1
+                                    col_m_l   = get_column_letter(idx_monto)
+
+                                    _encabezado(ws, n_dif, titulo, subtitulo)
+                                    ws.row_dimensions[4].height = 4
+
+                                    # Agrupar por CUIT manteniendo orden de aparición
+                                    grupos = {}
+                                    for r in lista_dif:
+                                        grupos.setdefault(r['CUIT'], []).append(r)
+
+                                    cur = 5  # fila de inicio
+                                    for cuit_v, registros in grupos.items():
+                                        # — Mini encabezado rojo ——————————————————————
+                                        for ci, h in enumerate(COLS_DIF, 1):
+                                            cell = ws.cell(cur, ci, value=h)
+                                            cell.font = HDR_FONT
+                                            cell.fill = PatternFill('solid', fgColor='C00000')
+                                            cell.alignment = CTR
+                                            cell.border = THIN
+                                        cur += 1
+
+                                        data_start = cur
+                                        # — Filas de detalle ——————————————————————————
+                                        for ri, rec in enumerate(registros):
+                                            fill = FILL_ZEBRA if ri % 2 == 1 else None
+                                            for ci, col in enumerate(COLS_DIF, 1):
+                                                val  = rec.get(col, '')
+                                                cell = ws.cell(cur, ci, value=val)
+                                                cell.alignment = CTR
+                                                cell.border = THIN
+                                                if fill: cell.fill = fill
+                                                if ci == idx_monto:
+                                                    cell.number_format = FMT_MONEY
+                                                if ci == idx_nro:
+                                                    # Forzar texto para evitar notación científica
+                                                    cell.number_format = '@'
+                                                    cell.value = str(val) if val != '' else ''
+                                            cur += 1
+                                        data_end = cur - 1
+
+                                        # — Fila TOTAL ————————————————————————————————
+                                        for ci in range(1, n_dif + 1):
+                                            cell = ws.cell(cur, ci)
+                                            cell.fill      = PatternFill('solid', fgColor='D9E1F2')
+                                            cell.border    = THIN
+                                            cell.alignment = CTR
+                                            cell.font      = Font(bold=True)
+                                        ws.cell(cur, 1).value = 'TOTAL'
+                                        cel_tot = ws.cell(cur, idx_monto)
+                                        cel_tot.value         = f'=SUM({col_m_l}{data_start}:{col_m_l}{data_end})'
+                                        cel_tot.number_format = FMT_MONEY
+                                        cel_tot.font          = Font(bold=True)
+                                        cur += 2  # TOTAL + 1 fila vacía
+
+                                    _autofit_ws(ws, n_dif)
+
+                                if lista_m_dif:
+                                    ws_mas_m = writer.book.create_sheet('DE MAS EN MENDEZ')
+                                    _escribir_por_cuit(
+                                        ws_mas_m, lista_m_dif,
                                         'DE MAS EN MENDEZ',
                                         f'Comprobantes enfrentados para CUITs con diferencias | {periodo}'
                                     )
-                                    ws_mas_m.row_dimensions[4].height = 4
-                                    _estilizar_hdr(ws_mas_m, 5, n_mas_m, fill=PatternFill('solid', fgColor='C00000'))
-                                    
-                                    idx_m_mas_m = list(df_mas_mendez.columns).index('Monto') + 1
-
-                                    for row_i in range(6, len(df_mas_mendez) + 6):
-                                        fill = FILL_ZEBRA if (row_i % 2 == 0) else None
-                                        
-                                        for c in range(1, n_mas_m + 1):
-                                            cell = ws_mas_m.cell(row=row_i, column=c)
-                                            cell.alignment = CTR
-                                            cell.border = THIN
-                                            if fill: cell.fill = fill
-                                            if c == idx_m_mas_m: cell.number_format = FMT_MONEY
-                                            
-                                    tot_row_m = len(df_mas_mendez) + 6
-                                    ws_mas_m.cell(row=tot_row_m, column=1).value = 'TOTAL'
-                                    ws_mas_m.cell(row=tot_row_m, column=1).font = Font(bold=True)
-                                    ws_mas_m.cell(row=tot_row_m, column=1).alignment = CTR
-                                    for c in range(1, n_mas_m + 1):
-                                        c_cel = ws_mas_m.cell(row=tot_row_m, column=c)
-                                        c_cel.fill = PatternFill('solid', fgColor='D9E1F2')
-                                        c_cel.border = THIN
-                                    
-                                    col_m_l = get_column_letter(idx_m_mas_m)
-                                    cel_t_m = ws_mas_m.cell(row=tot_row_m, column=idx_m_mas_m)
-                                    cel_t_m.value = f'=SUM({col_m_l}6:{col_m_l}{tot_row_m-1})'
-                                    cel_t_m.number_format = FMT_MONEY
-                                    cel_t_m.font = Font(bold=True)
-                                    cel_t_m.alignment = CTR
-                                    
-                                    _autofit_ws(ws_mas_m, n_mas_m)
 
                                 # ══════ Hoja 2.5: DE MAS EN ORGANISMO ═══════════════════════════
-                                if not df_mas_org.empty:
-                                    hoja_org_name = f'DE MAS EN {organismo[:10]}'
-                                    df_mas_org.to_excel(writer, sheet_name=hoja_org_name, index=False, startrow=4)
-                                    ws_mas_o = writer.sheets[hoja_org_name]
-                                    n_mas_o = len(df_mas_org.columns)
-                                    _encabezado(ws_mas_o, n_mas_o,
-                                        f'DE MAS EN {organismo}',
+                                if lista_a_dif:
+                                    hoja_org_name = f'DE MAS EN {label_organismo[:10]}'
+                                    ws_mas_o = writer.book.create_sheet(hoja_org_name)
+                                    _escribir_por_cuit(
+                                        ws_mas_o, lista_a_dif,
+                                        f'DE MAS EN {label_organismo}',
                                         f'Comprobantes enfrentados para CUITs con diferencias | {periodo}'
                                     )
-                                    ws_mas_o.row_dimensions[4].height = 4
-                                    _estilizar_hdr(ws_mas_o, 5, n_mas_o, fill=PatternFill('solid', fgColor='C00000'))
-                                    
-                                    idx_m_mas_o = list(df_mas_org.columns).index('Monto') + 1
 
-                                    for row_i in range(6, len(df_mas_org) + 6):
-                                        fill = FILL_ZEBRA if (row_i % 2 == 0) else None
-                                        
-                                        for c in range(1, n_mas_o + 1):
-                                            cell = ws_mas_o.cell(row=row_i, column=c)
-                                            cell.alignment = CTR
-                                            cell.border = THIN
-                                            if fill: cell.fill = fill
-                                            if c == idx_m_mas_o: cell.number_format = FMT_MONEY
-                                            
-                                    tot_row_o = len(df_mas_org) + 6
-                                    ws_mas_o.cell(row=tot_row_o, column=1).value = 'TOTAL'
-                                    ws_mas_o.cell(row=tot_row_o, column=1).font = Font(bold=True)
-                                    ws_mas_o.cell(row=tot_row_o, column=1).alignment = CTR
-                                    for c in range(1, n_mas_o + 1):
-                                        c_cel = ws_mas_o.cell(row=tot_row_o, column=c)
-                                        c_cel.fill = PatternFill('solid', fgColor='D9E1F2')
-                                        c_cel.border = THIN
-                                    
-                                    col_o_l = get_column_letter(idx_m_mas_o)
-                                    cel_t_o = ws_mas_o.cell(row=tot_row_o, column=idx_m_mas_o)
-                                    cel_t_o.value = f'=SUM({col_o_l}6:{col_o_l}{tot_row_o-1})'
-                                    cel_t_o.number_format = FMT_MONEY
-                                    cel_t_o.font = Font(bold=True)
-                                    cel_t_o.alignment = CTR
-                                    
-                                    _autofit_ws(ws_mas_o, n_mas_o)
-                                
+
                                 # Añadir formato condicional amarillo a diferencias
 
 
 
 
 
-                                # ══════ Hoja 3: DETALLE ARBA ═══════════════════════════
+                                # ══════ Hoja 3: DETALLE ORGANISMO ═══════════════════════════
                                 df_arba_det.to_excel(writer, sheet_name=f'Detalle {organismo}', index=False, startrow=4)
                                 ws2 = writer.sheets[f'Detalle {organismo}']
                                 n2 = len(df_arba_det.columns)
                                 _encabezado(ws2, n2,
-                                    f'DETALLE ARBA · {label_tipo.upper()}',
+                                    f'DETALLE {organismo} · {label_tipo.upper()}',
                                     f'{len(registros_activos)} registros | {periodo}'
                                 )
                                 ws2.row_dimensions[4].height = 4
