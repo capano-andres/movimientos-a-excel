@@ -2998,7 +2998,7 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
     st.markdown('<div class="card"><div class="card-label">00 · Configuración del Cruce</div>', unsafe_allow_html=True)
     col1, col2, col3 = st.columns(3)
     with col1:
-        organismo = st.selectbox("Organismo:", ["ARBA", "AGIP", "IVA"], index=0)
+        organismo = st.selectbox("Organismo:", ["ARBA", "AGIP", "IVA", "Ganancias"], index=0)
     with col2:
         tipo_cruce_sel = st.selectbox("Tipo de Deducción:", ["Percepciones", "Retenciones"], index=0)
     with col3:
@@ -3130,6 +3130,9 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
             elif 'importe' in c_low: cols_map['monto'] = c
             elif 'razon social' in c_low or 'denominaci' in c_low: cols_map['razon_social'] = c
             elif 'operaci' in c_low: cols_map['operacion'] = c
+            # Fecha Ret./Perc.: columna con 'fecha' pero SIN 'comprobante' (ej: "Fecha Ret./Perc.")
+            elif 'fecha' in c_low and 'comprobante' not in c_low and 'registra' not in c_low:
+                cols_map['fecha_ret'] = c
         # Pasada 2: fallback para columnas sin 'comprobante' (ej: 'Tipo', 'Nro', 'Fecha')
         for c in df.columns:
             c_low = str(c).lower().strip()
@@ -3156,14 +3159,18 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
             
             op_raw = str(row.get(cols_map.get('operacion', 'Operacion'), 'PERCEPCION'))
             seccion = "R" if 'reten' in op_raw.lower() else "P"
-            
+
             rz = str(row.get(cols_map.get('razon_social', 'Razon Social'), '')).strip()
             fecha_s = str(row.get(cols_map.get('fecha', 'Fecha'), '')).strip()
-            
+            # Fecha de la retención/percepción (distinta a la fecha del comprobante)
+            fecha_ret_s = str(row.get(cols_map.get('fecha_ret', ''), '')).strip()
+            if fecha_ret_s in ('', 'nan', 'None'):
+                fecha_ret_s = ''
+
             # Nro: viene como str limpio (sin notación científica gracias a dtype=str)
             nro_m = str(row.get(cols_map.get('nro', 'Nro'), '')).strip()
             tipo_c = str(row.get(cols_map.get('tipo_comp', 'Tipo'), '')).strip()
-            
+
             pv_norm = "0"
             nro_norm = nro_m
             try:
@@ -3175,13 +3182,14 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                     nro_norm = str(int(float(nro_norm)))
             except (ValueError, OverflowError):
                 pass
-                
+
             registro = {
                 'tipo_reg':    seccion,
                 'cod_jur':     '00000',
                 'cuit':        cuit_raw,
                 'cuit_limpio': cuit_limpio,
                 'fecha':       fecha_s,
+                'fecha_ret':   fecha_ret_s,
                 'pv':          pv_norm,
                 'pv_norm':     pv_norm,
                 'nro':         nro_m,
@@ -3382,16 +3390,24 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                         elif organismo == "AGIP":
                             agip_content = uploaded_arba_txt_arba.getvalue()
                             arba_data    = parsear_agip_iibb(agip_content)
-                        elif organismo == "IVA":
+                        elif organismo in ("IVA", "Ganancias"):
                             iva_content = uploaded_arba_txt_arba.getvalue()
                             arba_data    = parsear_iva_xls(iva_content)
 
-                    # Alias de visualización: IVA → ARCA en títulos y nombres de hojas
-                    label_organismo = "ARCA" if organismo == "IVA" else organismo
+                    # Alias de visualización: IVA/Ganancias → ARCA en títulos y nombres de hojas
+                    label_organismo = "ARCA" if organismo in ("IVA", "Ganancias") else organismo
 
                     percepciones = arba_data['percepciones']
                     retenciones  = arba_data['retenciones']
-                    registros_activos = percepciones + retenciones
+                    # Filtrar por tipo seleccionado: si el usuario elige "Retenciones"
+                    # no incluir percepciones y viceversa (evita falsos cruces si el
+                    # archivo del organismo contiene ambos tipos a la vez).
+                    if tipo_default_arba == "P":
+                        registros_activos = percepciones
+                    elif tipo_default_arba == "R":
+                        registros_activos = retenciones
+                    else:
+                        registros_activos = percepciones + retenciones
 
                     if tipo_default_arba == "P":
                         label_tipo = "Percepciones"
@@ -3401,6 +3417,9 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                         elif organismo == "IVA":
                             kw_mendez = ("IVA", "I.V.A", "AGREGADO")
                             excl_mendez = ("ADUA", "GCIAS")
+                        elif organismo == "Ganancias":
+                            kw_mendez = ("GCIAS", "GANANCIAS", "GCIA")
+                            excl_mendez = ("ADUA", "I.V.A", "IVA", "SIRCREB", "SIRTAC")
                         else:
                             kw_mendez = ("BS.AS", "BSAS", "BS AS", "BUENOS AIRES")
                             excl_mendez = ("ADUA", "I.V.A", "IVA", "GCIAS")
@@ -3412,6 +3431,9 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                         elif organismo == "IVA":
                             kw_mendez = ("IVA", "I.V.A", "AGREGADO")
                             excl_mendez = ("SIRCREB", "SIRTAC", "BCO", "GCIAS", "BANCO", "BANCAR")
+                        elif organismo == "Ganancias":
+                            kw_mendez = ("GCIAS", "GANANCIAS", "GCIA")
+                            excl_mendez = ("SIRCREB", "SIRTAC", "BCO", "IVA", "BANCO", "BANCAR")
                         else:
                             kw_mendez = ("BS.AS", "BSAS", "BS AS", "BUENOS AIRES")
                             excl_mendez = ("SIRCREB", "SIRTAC", "BCO", "GCIAS", "IVA", "BANCO", "BANCAR")
@@ -3423,6 +3445,9 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                         elif organismo == "IVA":
                             kw_mendez = ("IVA", "I.V.A", "AGREGADO")
                             excl_mendez = ("ADUA", "GCIAS", "SIRCREB", "SIRTAC", "BCO", "BANCO")
+                        elif organismo == "Ganancias":
+                            kw_mendez = ("GCIAS", "GANANCIAS", "GCIA")
+                            excl_mendez = ("ADUA", "I.V.A", "IVA", "SIRCREB", "SIRTAC", "BCO", "BANCO")
                         else:
                             kw_mendez = ("BS.AS", "BSAS", "BS AS", "BUENOS AIRES")
                             excl_mendez = ("ADUA", "I.V.A", "IVA", "GCIAS", "SIRCREB", "SIRTAC", "BCO", "BANCO")
@@ -3523,9 +3548,9 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                         fecha_fmt = f"{int(dia_raw):02d}/{mes_anio_mendez}"
 
                                     mendez_detalle.append({
-                                        'CUIT':       cuit_raw_fmt,
-                                        'Proveedor':  t.get('Proveedor', ''),
-                                        'Fecha':      fecha_fmt,
+                                        'CUIT':         cuit_raw_fmt,
+                                        'Proveedor':    t.get('Proveedor', ''),
+                                        'Fecha Emision': fecha_fmt,
                                         'Tipo Comp.': t.get('Tipo', ''),
 
                                         'PV':         int(pv_m) if str(pv_m).isdigit() else pv_m,
@@ -3601,7 +3626,7 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                             def agregar_subtotales_cuit(lista_dicts, col_monto='Monto'):
                                 if not lista_dicts: return []
                                 # Ordenar por CUIT y Fecha
-                                lista_dicts.sort(key=lambda x: (x.get('CUIT', ''), x.get('Fecha', '')))
+                                lista_dicts.sort(key=lambda x: (x.get('CUIT', ''), x.get('Fecha Emision', '')))
                                 filas_out = []
                                 last_cuit = None
                                 last_prov = ""
@@ -3634,15 +3659,23 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                     filas_out.append(sub)
                                 return filas_out
 
-                            arba_detalle_list = [{
-                                'CUIT':       r['cuit'],
-                                'Proveedor':  cuit_proveedor.get(r['cuit_limpio'], ''),
-                                'Fecha':      r['fecha'],
-                                'Tipo Comp.': r['tipo_comp'],
-                                'PV':         int(r['pv_norm']) if str(r['pv_norm']).isdigit() else r['pv_norm'],
-                                'Nro':        int(r['nro_norm']) if str(r['nro_norm']).isdigit() else r['nro_norm'],
-                                'Monto':      r['monto'],
-                            } for r in registros_activos]
+                            # Para IVA/Ganancias: la columna PV se reutiliza para mostrar la Fecha Ret./Perc.
+                            # (el Nro ya incluye el número completo sin necesidad de PV separado)
+                            _usa_fecha_ret = organismo in ('IVA', 'Ganancias')
+                            _pv_col_lbl = 'Fecha Ret./Perc.' if _usa_fecha_ret else 'PV'
+                            arba_detalle_list = [
+                                {
+                                    'CUIT':        r['cuit'],
+                                    'Proveedor':   cuit_proveedor.get(r['cuit_limpio'], ''),
+                                    'Fecha Emision': r['fecha'],
+                                    'Tipo Comp.':    r['tipo_comp'],
+                                    _pv_col_lbl:   r.get('fecha_ret', '') if _usa_fecha_ret
+                                                   else (int(r['pv_norm']) if str(r['pv_norm']).isdigit() else r['pv_norm']),
+                                    'Nro':         int(r['nro_norm']) if str(r['nro_norm']).isdigit() else r['nro_norm'],
+                                    'Monto':       r['monto'],
+                                }
+                                for r in registros_activos
+                            ]
 
                             # -------------------------------------------------------------
                             # Matriz de Diferencias (Separada por Mendez y Organismo)
@@ -3693,21 +3726,22 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                         lista_a_dif.append(t_copy)
 
 
-                            cols_out = ['CUIT', 'Proveedor', 'Fecha', 'Tipo Comp.', 'PV', 'Nro', 'Monto']
-                            df_mas_mendez = pd.DataFrame(lista_m_dif)[cols_out] if lista_m_dif else pd.DataFrame(columns=cols_out)
-                            df_mas_org    = pd.DataFrame(lista_a_dif)[cols_out] if lista_a_dif else pd.DataFrame(columns=cols_out)
+                            cols_out_men = ['CUIT', 'Proveedor', 'Fecha Emision', 'Tipo Comp.', 'PV', 'Nro', 'Monto']
+                            cols_out_org = ['CUIT', 'Proveedor', 'Fecha Emision', 'Tipo Comp.', _pv_col_lbl, 'Nro', 'Monto']
+                            df_mas_mendez = pd.DataFrame(lista_m_dif)[cols_out_men] if lista_m_dif else pd.DataFrame(columns=cols_out_men)
+                            df_mas_org    = pd.DataFrame(lista_a_dif)[cols_out_org] if lista_a_dif else pd.DataFrame(columns=cols_out_org)
 
                             df_cruce      = pd.DataFrame(filas_cruce)
                             df_mendez_det = pd.DataFrame(agregar_subtotales_cuit(mendez_detalle))
                             df_arba_det   = pd.DataFrame(agregar_subtotales_cuit(arba_detalle_list))
 
                             if df_mendez_det.empty:
-                                df_mendez_det = pd.DataFrame(columns=['CUIT', 'Proveedor', 'Fecha', 'Tipo Comp.', 'PV', 'Nro', 'Monto'])
+                                df_mendez_det = pd.DataFrame(columns=['CUIT', 'Proveedor', 'Fecha Emision', 'Tipo Comp.', 'PV', 'Nro', 'Monto'])
                             df_mendez_det['Estado'] = ''
                             df_mendez_det['Cantidad'] = ''
 
                             if df_arba_det.empty:
-                                df_arba_det = pd.DataFrame(columns=['CUIT', 'Proveedor', 'Fecha', 'Tipo Comp.', 'PV', 'Nro', 'Monto'])
+                                df_arba_det = pd.DataFrame(columns=['CUIT', 'Proveedor', 'Fecha Emision', 'Tipo Comp.', 'PV', 'Nro', 'Monto'])
                             df_arba_det['Estado'] = ''
                             df_arba_det['Cantidad'] = ''
 
@@ -3912,18 +3946,27 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 f_fal_org = FormulaRule(formula=[f'$F6="⚠ Falta en {organismo}"'], stopIfTrue=False, fill=FILL_RED)
                                 f_fal_men = FormulaRule(formula=['$F6="⚠ Falta en Mendez"'], stopIfTrue=False, fill=FILL_ORANGE)
 
-                                ws1.conditional_formatting.add(f'A6:F{len(cuits_sorted)+5}', f_dif)
-                                ws1.conditional_formatting.add(f'A6:F{len(cuits_sorted)+5}', f_fal_org)
-                                ws1.conditional_formatting.add(f'A6:F{len(cuits_sorted)+5}', f_fal_men)
+                                _cf_last_1 = max(len(cuits_sorted) + 5, 6)
+                                ws1.conditional_formatting.add(f'A6:F{_cf_last_1}', f_dif)
+                                ws1.conditional_formatting.add(f'A6:F{_cf_last_1}', f_fal_org)
+                                ws1.conditional_formatting.add(f'A6:F{_cf_last_1}', f_fal_men)
                                 
                                 # ══════ Hoja 2: DE MAS EN MENDEZ ═══════════════════════════
-                                def _escribir_por_cuit(ws, lista_dif, titulo, subtitulo):
-                                    """Escribe mini-tablas por CUIT: encabezado rojo + datos + TOTAL + fila vacía."""
-                                    COLS_DIF  = ['CUIT', 'Proveedor', 'Fecha', 'Tipo Comp.', 'PV', 'Nro', 'Monto']
+                                def _escribir_por_cuit(ws, lista_dif, titulo, subtitulo, col_labels=None):
+                                    """Escribe mini-tablas por CUIT: encabezado rojo + datos + TOTAL + fila vacía.
+                                    col_labels: dict opcional {key_col: label_display} para renombrar cabeceras."""
+                                    # Las COLS_DIF usan las claves reales del dict de datos
+                                    # (para IVA la clave 'PV' ya viene como 'Fecha Ret./Perc.' en los datos)
+                                    primera = lista_dif[0] if lista_dif else {}
+                                    COLS_DIF = [k for k in ['CUIT', 'Proveedor', 'Fecha Emision', 'Tipo Comp.', 'PV', 'Fecha Ret./Perc.', 'Nro', 'Monto'] if k in primera]
+                                    if not COLS_DIF:
+                                        COLS_DIF = ['CUIT', 'Proveedor', 'Fecha Emision', 'Tipo Comp.', 'PV', 'Nro', 'Monto']
                                     n_dif     = len(COLS_DIF)
                                     idx_monto = COLS_DIF.index('Monto') + 1
                                     idx_nro   = COLS_DIF.index('Nro') + 1
                                     col_m_l   = get_column_letter(idx_monto)
+                                    # Labels de cabecera: usa col_labels si se provee, si no el nombre de clave
+                                    _labels   = col_labels or {}
 
                                     _encabezado(ws, n_dif, titulo, subtitulo)
                                     ws.row_dimensions[4].height = 4
@@ -3937,7 +3980,7 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                     for cuit_v, registros in grupos.items():
                                         # — Mini encabezado rojo ——————————————————————
                                         for ci, h in enumerate(COLS_DIF, 1):
-                                            cell = ws.cell(cur, ci, value=h)
+                                            cell = ws.cell(cur, ci, value=_labels.get(h, h))
                                             cell.font = HDR_FONT
                                             cell.fill = PatternFill('solid', fgColor='C00000')
                                             cell.alignment = CTR
@@ -4014,24 +4057,35 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 )
                                 ws2.row_dimensions[4].height = 4
                                 _estilizar_hdr(ws2, 5, n2)
-                                
+                                # Para IVA: la columna PV del DataFrame ya se llama 'Fecha Ret./Perc.'
+                                # (el nombre viene de _pv_col_lbl); no hace falta renombrar la celda.
+
                                 idx_monto_arba = list(df_arba_det.columns).index('Monto') + 1
                                 idx_prov_arba  = list(df_arba_det.columns).index('Proveedor') + 1
                                 idx_match_arba = list(df_arba_det.columns).index('Estado') + 1
                                 idx_cant_arba  = list(df_arba_det.columns).index('Cantidad') + 1
                                 last_men_r     = max(len(mendez_detalle) + 6, 7) # aprox para countifs
-                                
-                                for row_i in range(6, len(df_arba_det) + 6):
+                                _col_m_a = get_column_letter(idx_monto_arba)
+                                _col_p_a = get_column_letter(idx_prov_arba)
+                                _last_a  = len(df_arba_det) + 5  # última fila de datos (base 1)
+
+                                for row_i in range(6, _last_a + 1):
                                     is_sub = str(ws2.cell(row=row_i, column=idx_prov_arba).value).endswith('(SUBTOTAL)')
                                     fill = FILL_ZEBRA if (row_i % 2 == 0) else None
                                     if is_sub:
                                         fill = PatternFill('solid', fgColor='D9E1F2')
                                         ws2.row_dimensions[row_i].outlineLevel = 0
+                                        # Subtotal formulado: suma comprobantes del CUIT excluyendo la propia fila subtotal
+                                        ws2.cell(row=row_i, column=idx_monto_arba).value = (
+                                            f'=SUMIFS(${_col_m_a}$6:${_col_m_a}${_last_a},'
+                                            f'$A$6:$A${_last_a},A{row_i},'
+                                            f'${_col_p_a}$6:${_col_p_a}${_last_a},"<>*(SUBTOTAL)*")'
+                                        )
                                     else:
                                         ws2.row_dimensions[row_i].outlineLevel = 1
                                         ws2.row_dimensions[row_i].hidden = True
-                                    
-                                    # Formular 
+
+                                    # Formular Estado y Cantidad
                                     ws2.cell(row=row_i, column=idx_match_arba).value = (
                                         f'=IF(COUNTIF(B{row_i}, "*(SUBTOTAL)*")>0, '
                                         f'IFERROR(VLOOKUP(A{row_i}, \'Cruce x CUIT\'!$A$6:$F${len(cuits_sorted)+5}, 6, 0), ""), '
@@ -4039,7 +4093,7 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                     )
                                     ws2.cell(row=row_i, column=idx_cant_arba).value = (
                                         f'=IF(COUNTIF(B{row_i}, "*(SUBTOTAL)*")>0, '
-                                        f'COUNTIFS($A$6:$A${len(df_arba_det)+5}, A{row_i}, $B$6:$B${len(df_arba_det)+5}, "<>*(SUBTOTAL)*"), '
+                                        f'COUNTIFS($A$6:$A${_last_a}, A{row_i}, $B$6:$B${_last_a}, "<>*(SUBTOTAL)*"), '
                                         f'"")'
                                     )
 
@@ -4049,6 +4103,23 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                         if fill: cell.fill = fill
                                         if is_sub: cell.font = Font(bold=True)
                                         if c == idx_monto_arba: cell.number_format = FMT_MONEY
+
+                                # ── Fila TOTAL GENERAL organismo ──────────────────────
+                                _tot_a = _last_a + 1
+                                for ci in range(1, n2 + 1):
+                                    cell = ws2.cell(_tot_a, ci)
+                                    cell.fill = FILL_TITLE
+                                    cell.font = Font(bold=True, size=10, color='FFFFFF')
+                                    cell.alignment = CTR; cell.border = THIN
+                                ws2.cell(_tot_a, 1).value = 'TOTAL GENERAL'
+                                _cel_tot_a = ws2.cell(_tot_a, idx_monto_arba)
+                                _cel_tot_a.value = (
+                                    f'=SUMIFS({_col_m_a}6:{_col_m_a}{_last_a},'
+                                    f'{_col_p_a}6:{_col_p_a}{_last_a},"<>*(SUBTOTAL)*")'
+                                )
+                                _cel_tot_a.number_format = FMT_MONEY
+                                _cel_tot_a.font = Font(bold=True, color='FFFFFF')
+                                ws2.row_dimensions[_tot_a].height = 18
                                 _autofit_ws(ws2, n2)
                                 
                                 
@@ -4059,9 +4130,10 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 r_dif = FormulaRule(formula=[f'${str_col}6="⚠ Diferencia"'], stopIfTrue=False, fill=FILL_YELLOW)
                                 r_men = FormulaRule(formula=[f'${str_col}6="⚠ Falta en Mendez"'], stopIfTrue=False, fill=FILL_ORANGE)
                                 r_ok  = FormulaRule(formula=[f'${str_col}6="✓ Ok"'], stopIfTrue=False, fill=FILL_OK)
-                                ws2.conditional_formatting.add(f'A6:{openpyxl.utils.get_column_letter(n2)}{len(df_arba_det)+5}', r_dif)
-                                ws2.conditional_formatting.add(f'A6:{openpyxl.utils.get_column_letter(n2)}{len(df_arba_det)+5}', r_men)
-                                ws2.conditional_formatting.add(f'A6:{openpyxl.utils.get_column_letter(n2)}{len(df_arba_det)+5}', r_ok)
+                                _cf_last_a = max(len(df_arba_det) + 5, 6)
+                                ws2.conditional_formatting.add(f'A6:{openpyxl.utils.get_column_letter(n2)}{_cf_last_a}', r_dif)
+                                ws2.conditional_formatting.add(f'A6:{openpyxl.utils.get_column_letter(n2)}{_cf_last_a}', r_men)
+                                ws2.conditional_formatting.add(f'A6:{openpyxl.utils.get_column_letter(n2)}{_cf_last_a}', r_ok)
 
 
 
@@ -4081,18 +4153,27 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 idx_prov_men  = list(df_mendez_det.columns).index('Proveedor') + 1
                                 idx_match_men = list(df_mendez_det.columns).index('Estado') + 1
                                 idx_cant_men  = list(df_mendez_det.columns).index('Cantidad') + 1
-                                
-                                for row_i in range(6, len(df_mendez_det) + 6):
+                                _col_m_m = get_column_letter(idx_monto_men)
+                                _col_p_m = get_column_letter(idx_prov_men)
+                                _last_m  = len(df_mendez_det) + 5  # última fila de datos (base 1)
+
+                                for row_i in range(6, _last_m + 1):
                                     is_sub = str(ws3.cell(row=row_i, column=idx_prov_men).value).endswith('(SUBTOTAL)')
                                     fill = FILL_ZEBRA if (row_i % 2 == 0) else None
                                     if is_sub:
                                         fill = PatternFill('solid', fgColor='D9E1F2')
                                         ws3.row_dimensions[row_i].outlineLevel = 0
+                                        # Subtotal formulado: suma comprobantes del CUIT excluyendo la propia fila subtotal
+                                        ws3.cell(row=row_i, column=idx_monto_men).value = (
+                                            f'=SUMIFS(${_col_m_m}$6:${_col_m_m}${_last_m},'
+                                            f'$A$6:$A${_last_m},A{row_i},'
+                                            f'${_col_p_m}$6:${_col_p_m}${_last_m},"<>*(SUBTOTAL)*")'
+                                        )
                                     else:
                                         ws3.row_dimensions[row_i].outlineLevel = 1
                                         ws3.row_dimensions[row_i].hidden = True
-                                        
-                                    # Formula
+
+                                    # Formula Estado y Cantidad
                                     ws3.cell(row=row_i, column=idx_match_men).value = (
                                         f'=IF(COUNTIF(B{row_i}, "*(SUBTOTAL)*")>0, '
                                         f'IFERROR(VLOOKUP(A{row_i}, \'Cruce x CUIT\'!$A$6:$F${len(cuits_sorted)+5}, 6, 0), ""), '
@@ -4100,16 +4181,33 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                     )
                                     ws3.cell(row=row_i, column=idx_cant_men).value = (
                                         f'=IF(COUNTIF(B{row_i}, "*(SUBTOTAL)*")>0, '
-                                        f'COUNTIFS($A$6:$A${len(df_mendez_det)+5}, A{row_i}, $B$6:$B${len(df_mendez_det)+5}, "<>*(SUBTOTAL)*"), '
+                                        f'COUNTIFS($A$6:$A${_last_m}, A{row_i}, $B$6:$B${_last_m}, "<>*(SUBTOTAL)*"), '
                                         f'"")'
                                     )
-                                        
+
                                     for c in range(1, n3 + 1):
                                         cell = ws3.cell(row=row_i, column=c)
                                         cell.alignment = CTR; cell.border = THIN
                                         if fill: cell.fill = fill
                                         if is_sub: cell.font = Font(bold=True)
                                         if c == idx_monto_men: cell.number_format = FMT_MONEY
+
+                                # ── Fila TOTAL GENERAL Mendez ─────────────────────────
+                                _tot_m = _last_m + 1
+                                for ci in range(1, n3 + 1):
+                                    cell = ws3.cell(_tot_m, ci)
+                                    cell.fill = PatternFill('solid', fgColor='2E75B6')
+                                    cell.font = Font(bold=True, size=10, color='FFFFFF')
+                                    cell.alignment = CTR; cell.border = THIN
+                                ws3.cell(_tot_m, 1).value = 'TOTAL GENERAL'
+                                _cel_tot_m = ws3.cell(_tot_m, idx_monto_men)
+                                _cel_tot_m.value = (
+                                    f'=SUMIFS({_col_m_m}6:{_col_m_m}{_last_m},'
+                                    f'{_col_p_m}6:{_col_p_m}{_last_m},"<>*(SUBTOTAL)*")'
+                                )
+                                _cel_tot_m.number_format = FMT_MONEY
+                                _cel_tot_m.font = Font(bold=True, color='FFFFFF')
+                                ws3.row_dimensions[_tot_m].height = 18
                                 _autofit_ws(ws3, n3)
                                 
 
@@ -4120,9 +4218,10 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 r_dif_m = FormulaRule(formula=[f'${str_col_m}6="⚠ Diferencia"'], stopIfTrue=False, fill=FILL_YELLOW)
                                 r_org_m = FormulaRule(formula=[f'${str_col_m}6="⚠ Falta en {organismo}"'], stopIfTrue=False, fill=FILL_RED)
                                 r_ok_m  = FormulaRule(formula=[f'${str_col_m}6="✓ Ok"'], stopIfTrue=False, fill=FILL_OK)
-                                ws3.conditional_formatting.add(f'A6:{openpyxl.utils.get_column_letter(n3)}{len(df_mendez_det)+5}', r_dif_m)
-                                ws3.conditional_formatting.add(f'A6:{openpyxl.utils.get_column_letter(n3)}{len(df_mendez_det)+5}', r_org_m)
-                                ws3.conditional_formatting.add(f'A6:{openpyxl.utils.get_column_letter(n3)}{len(df_mendez_det)+5}', r_ok_m)
+                                _cf_last_m = max(len(df_mendez_det) + 5, 6)
+                                ws3.conditional_formatting.add(f'A6:{openpyxl.utils.get_column_letter(n3)}{_cf_last_m}', r_dif_m)
+                                ws3.conditional_formatting.add(f'A6:{openpyxl.utils.get_column_letter(n3)}{_cf_last_m}', r_org_m)
+                                ws3.conditional_formatting.add(f'A6:{openpyxl.utils.get_column_letter(n3)}{_cf_last_m}', r_ok_m)
 
 
 
