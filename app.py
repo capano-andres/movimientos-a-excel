@@ -1,4 +1,4 @@
-import streamlit as st
+﻿import streamlit as st
 import io
 import re
 import zipfile
@@ -1075,12 +1075,192 @@ elif herramienta == TOOL_SIFERE:
     st.markdown('<div class="card"><div class="card-label">01 · Tipo de archivo SIFERE</div>', unsafe_allow_html=True)
     tipo_sifere = st.radio(
         "¿Qué tipo de archivo SIFERE querés generar?",
-        options=["Percepciones", "Retenciones"],
+        options=["Percepciones", "Retenciones"],  # "Percepciones AGIP (RentasCiudad.xls)" deshabilitado temporalmente
         horizontal=True,
         key="sifere_tipo"
     )
     st.markdown('</div>', unsafe_allow_html=True)
 
+    # # ── Rama AGIP desde XLS ──────────────────────────────────────────────────────
+    # if tipo_sifere == "Percepciones AGIP (RentasCiudad.xls)":
+    # st.markdown('<div class="card"><div class="card-label">02 · Archivo RentasCiudad (.xls / .csv)</div>', unsafe_allow_html=True)
+    # uploaded_agip_xls = st.file_uploader(
+    # "Subí el archivo exportado de Rentas Ciudad AGIP",
+    # type=["xls", "csv"],
+    # label_visibility="visible",
+    # key="sifere_agip_xls"
+    # )
+    # st.markdown('</div>', unsafe_allow_html=True)
+    #
+    # st.markdown('<div class="card"><div class="card-label">03 · Datos del período</div>', unsafe_allow_html=True)
+    # col_ag1, col_ag2 = st.columns(2)
+    # with col_ag1:
+    # cuit_agip = st.text_input("CUIT del contribuyente (sin guiones)", value="", placeholder="30631005833", key="sifere_agip_cuit")
+    # with col_ag2:
+    # periodo_agip = st.text_input("Período (MM/AAAA)", value="", placeholder="03/2026", key="sifere_agip_periodo")
+    # st.markdown('</div>', unsafe_allow_html=True)
+    #
+    # st.markdown('<div class="card"><div class="card-label">03b · Excepciones de Punto de Venta (opcional)</div>', unsafe_allow_html=True)
+    # st.caption(
+    # "Algunos proveedores tienen PV que termina en ceros (ej: 1000, 200) y el sistema no puede detectarlo automáticamente. "
+    # "Ingresá los casos especiales en formato `CUIT:PV` (uno por línea, el CUIT sin guiones)."
+    # )
+    # pv_overrides_raw = st.text_area(
+    # "Excepciones CUIT → PV (sin guiones · sin ceros iniciales)",
+    # value="",
+    # placeholder="30123456789:1000\n30987654321:200\n20111222333:10",
+    # height=100,
+    # key="sifere_agip_pv_overrides"
+    # )
+    # # Parsear las excepciones → dict {cuit_sin_guiones: pv_str_zfill4}
+    # pv_overrides = {}
+    # for line in pv_overrides_raw.strip().splitlines():
+    # line = line.strip()
+    # if ':' in line:
+    # parts = line.split(':', 1)
+    # cuit_ov = re.sub(r'\D', '', parts[0].strip())
+    # pv_ov   = parts[1].strip().lstrip('0') or '0'
+    # if cuit_ov:
+    # pv_overrides[cuit_ov] = pv_ov.zfill(4)
+    # if pv_overrides:
+    # st.info(f"✓ {len(pv_overrides)} excepción(es) cargada(s): " + ", ".join(f"{k}→{v}" for k, v in pv_overrides.items()))
+    # st.markdown('</div>', unsafe_allow_html=True)
+    #
+    # if uploaded_agip_xls:
+    # agip_filename = Path(uploaded_agip_xls.name).stem
+    # st.success(f"**{uploaded_agip_xls.name}** listo para procesar")
+    # st.markdown('<div class="card"><div class="card-label">04 · Generar TXT SIFERE AGIP</div>', unsafe_allow_html=True)
+    #
+    # if st.button("⬡  Generar SIFERE desde AGIP"):
+    # if not re.match(r'^(0[1-9]|1[0-2])/\d{4}$', periodo_agip.strip()):
+    # st.error("El período debe tener formato MM/AAAA (ej: 03/2026).")
+    # else:
+    # try:
+    # with st.spinner("Leyendo archivo AGIP..."):
+    # raw_agip = uploaded_agip_xls.getvalue()
+    # texto_agip = raw_agip.decode('latin-1', errors='replace')
+    # if texto_agip.lstrip().startswith('sep='):
+    # df_agip = pd.read_csv(io.StringIO(texto_agip), sep=',', encoding='latin-1', skiprows=1, on_bad_lines='skip')
+    # else:
+    # df_agip = pd.read_csv(io.StringIO(texto_agip), sep=',', encoding='latin-1', on_bad_lines='skip')
+    #
+    # # El CSV de RentasCiudad usa el CUIT como índice; resetear
+    # df_agip = df_agip.reset_index()
+    # df_agip.columns = [str(c).strip() for c in df_agip.columns]
+    #
+    # # Columnas por posición (por encoding la col 0 es el CUIT real):
+    # # 0=CUIT prov, 1=NAdher, 2=RazonSocial, 3=NroCert, 4=Norma,
+    # # 5=FechaPerc, 6=TipoComp(F/C/D), 7=NroComp("A0  XXXX"),
+    # # 8=FechaComp(DD/MM/YYYY), 9=MontoPercibido, 10=BaseCalculo
+    # idx_cuit    = 0
+    # idx_tipo    = 6
+    # idx_nrocomp = 7
+    # idx_fecha   = 8
+    # idx_monto   = 9
+    #
+    # per_parts = periodo_agip.strip().split('/')
+    # mes_agip  = per_parts[0].zfill(2)
+    # anio_agip = per_parts[1]
+    #
+    # TIPO_AGIP_SIFERE = {'F': 'FA', 'f': 'FA', 'C': 'CA', 'c': 'CA', 'D': 'DA', 'd': 'DA'}
+    # lineas = []
+    # errores = []
+    #
+    # for _, fila in df_agip.iterrows():
+    # try:
+    # cuit_prov_raw = str(fila.iloc[idx_cuit]).strip().replace('.', '').replace('-', '')
+    # nro_comp_raw  = str(fila.iloc[idx_nrocomp]).strip()
+    # tipo_raw      = str(fila.iloc[idx_tipo]).strip()
+    # fecha_raw     = str(fila.iloc[idx_fecha]).strip()
+    # monto_raw     = fila.iloc[idx_monto]
+    #
+    # # Parsear "A0   711000008388283" → PV(4) + Nro(8)
+    # # AGIP concatena el punto de venta (sin ceros iniciales)
+    # # seguido de ceros de relleno y luego el Nro (8 dígitos).
+    # # Regla: últimos 8 dígitos = Nro, el resto quitando
+    # # los ceros de relleno del final = PV.
+    # # EXCEPCIÓN: si el PV termina en ceros (ej: 1000) el
+    # # rstrip falla → se usa el override manual si está definido.
+    # partes_comp = nro_comp_raw.split()
+    # if len(partes_comp) >= 2:
+    # numero_largo = re.sub(r'\D', '', partes_comp[1])
+    # else:
+    # numero_largo = re.sub(r'\D', '', nro_comp_raw[2:])
+    #
+    # cuit_prov_clean_key = re.sub(r'\D', '', str(fila.iloc[idx_cuit]).strip())
+    # if cuit_prov_clean_key in pv_overrides:
+    # # Override manual: PV conocido, Nro = últimos 8
+    # pv_sif  = pv_overrides[cuit_prov_clean_key]
+    # nro_sif = numero_largo[-8:].zfill(8)
+    # elif len(numero_largo) > 8:
+    # nro_sif = numero_largo[-8:].zfill(8)
+    # pv_raw  = numero_largo[:-8].rstrip('0') or '0'
+    # pv_sif  = pv_raw[-4:].zfill(4)
+    # else:
+    # nro_sif = numero_largo.zfill(8)
+    # pv_sif  = '0000'
+    #
+    #
+    # tipo_sif = TIPO_AGIP_SIFERE.get(tipo_raw, 'FA')
+    #
+    # cuit_prov_clean = cuit_prov_raw.replace('-', '')
+    # if len(cuit_prov_clean) == 11:
+    # cuit_prov_fmt = f"{cuit_prov_clean[:2]}-{cuit_prov_clean[2:10]}-{cuit_prov_clean[10]}"
+    # else:
+    # cuit_prov_fmt = cuit_prov_clean.ljust(13)
+    #
+    # fecha_sif = fecha_raw if re.match(r'\d{2}/\d{2}/\d{4}', fecha_raw) else f"01/{mes_agip}/{anio_agip}"
+    #
+    # try:
+    # monto_val = float(str(monto_raw).replace(',', '.'))
+    # except Exception:
+    # monto_val = 0.0
+    # if monto_val == 0.0:
+    # continue
+    #
+    # parte_entera  = int(abs(monto_val))
+    # parte_decimal = f"{abs(monto_val):.2f}".split('.')[1]
+    # monto_fmt = f"-{parte_entera:07d},{parte_decimal}" if tipo_sif == 'CA' else f" {parte_entera:07d},{parte_decimal}"
+    #
+    # linea = f"901{cuit_prov_fmt}{fecha_sif}{pv_sif}{nro_sif}{tipo_sif}{monto_fmt}"
+    # lineas.append(linea)
+    #
+    # except Exception as ex_fila:
+    # errores.append(str(ex_fila))
+    # continue
+    #
+    # txt_agip = "\r\n".join(lineas)
+    # st.success(f"✓  SIFERE AGIP generado: **{len(lineas)} líneas**")
+    #
+    # if errores:
+    # st.warning(f"Se omitieron {len(errores)} filas con errores.")
+    # with st.expander("Ver errores"):
+    # for e in errores[:20]: st.text(e)
+    #
+    # st.markdown(f"""
+    # <div class="stats-row">
+    # <div class="stat-chip"><span class="stat-val">{len(df_agip)}</span><span class="stat-lbl">Registros</span></div>
+    # <div class="stat-chip"><span class="stat-val">{len(lineas)}</span><span class="stat-lbl">Líneas TXT</span></div>
+    # <div class="stat-chip"><span class="stat-val">901</span><span class="stat-lbl">Jurisdicción AGIP</span></div>
+    # </div>
+    # """, unsafe_allow_html=True)
+    #
+    # st.download_button(
+    # label="↓  Descargar TXT SIFERE AGIP",
+    # data=txt_agip.encode("latin-1", errors="replace"),
+    # file_name=f"{agip_filename}_sifere_agip.txt",
+    # mime="text/plain",
+    # use_container_width=True,
+    # )
+    # except Exception as e:
+    # st.error(f"Error al procesar el archivo: {str(e)}")
+    # st.exception(e)
+    #
+    # st.markdown('</div>', unsafe_allow_html=True)
+    # else:
+    # st.markdown('<div style="text-align:center;padding:2rem 1rem;font-family:\'Space Mono\',monospace;font-size:0.72rem;color:#6b7280;letter-spacing:0.12em;">ESPERANDO ARCHIVO RENTAS CIUDAD · PASO 02</div>', unsafe_allow_html=True)
+
+    # ── Rama TXT Mendez (Percepciones / Retenciones) ──────────────────────────────
     st.markdown('<div class="card"><div class="card-label">02 · Archivo fuente para SIFERE</div>', unsafe_allow_html=True)
     uploaded_sifere = st.file_uploader(
         "Arrastrá tu archivo de movimientos o hacé click para seleccionarlo",
@@ -1152,6 +1332,7 @@ elif herramienta == TOOL_SIFERE:
             ESPERANDO ARCHIVO · PASO 01
         </div>
         """, unsafe_allow_html=True)
+
 
 
 elif herramienta == TOOL_LIQUIDACIONES:

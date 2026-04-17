@@ -93,7 +93,7 @@ RE_MAIN = re.compile(
     r'(Ins\.|Mono|Monot|Exe |Exe\.|C\.F\.|Exp\.|Resp\.|SNC)\s+' # Cond IVA
     r'([\d-]{1,13})?\s+'                            # CUIT/DNI (Opcional, incluye "0" para Consumidor Final)
     r'(\d{1,3})\s+'                                 # Concepto
-    r'([A-Z])\s+'                                   # Jurisdicción (Letra A-Z)
+    r'([A-Z0-9])\s+'                                # Jurisdicción (Letra A-Z o 0 para exportación)
     r'(.+)$'                                        # Resto (tasa + montos)
 )
 
@@ -1911,7 +1911,8 @@ def generar_sifere_txt(transacciones: list[dict], meta: dict) -> str:
         tasa = t['Tasa']
         if tasa and tasa not in IVA_RATES:
             nombre_upper = tasa.upper()
-            if "PERC" in nombre_upper and "ADUA" not in nombre_upper and \
+            es_perc_iibb = ("PERC" in nombre_upper or "PER." in nombre_upper or "PER " in nombre_upper)
+            if es_perc_iibb and "ADUA" not in nombre_upper and \
                "I.V.A" not in nombre_upper and "GCIAS" not in nombre_upper and \
                "IVA" not in nombre_upper:
                 percepciones[tasa] = percepciones.get(tasa, 0.0) + t['Neto']
@@ -1922,7 +1923,8 @@ def generar_sifere_txt(transacciones: list[dict], meta: dict) -> str:
             if not nombre or nombre in IVA_RATES:
                 continue
             nombre_upper = nombre.upper()
-            if "PERC" in nombre_upper and "ADUA" not in nombre_upper and \
+            es_perc_iibb = ("PERC" in nombre_upper or "PER." in nombre_upper or "PER " in nombre_upper)
+            if es_perc_iibb and "ADUA" not in nombre_upper and \
                "I.V.A" not in nombre_upper and "GCIAS" not in nombre_upper and \
                "IVA" not in nombre_upper:
                 monto = s['Neto'] if s['Neto'] != 0.0 else s['Percepcion']
