@@ -380,6 +380,7 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
         'T.IMP 21%': ('Neto Imp. 21',  'IVA Imp. 21'),
         'T.IMP 10%': ('Neto Imp. 10.5','IVA Imp. 10.5'),
         'Exento':    ('Exento',    None),
+        'Cons.Fin.': ('Neto C.F.', None),
     }
 
     # En ventas, expandir monotributo a columnas Neto/IVA; en compras, dejar tasa cruda
@@ -400,7 +401,7 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
         'Neto Monot. 10.5', 'IVA Monot. 10.5',
         'Neto Imp. 21', 'IVA Imp. 21',
         'Neto Imp. 10.5', 'IVA Imp. 10.5',
-        'Exento', 'Monotributo',
+        'Exento', 'Neto C.F.', 'Monotributo',
     ]
 
     # ── 1. Recopilar sub-conceptos y tasas presentes ────────

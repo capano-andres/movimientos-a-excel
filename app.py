@@ -3786,7 +3786,16 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 cuit_fmt = f"{ck[:2]}-{ck[2:10]}-{ck[10]}" if len(ck) == 11 else ck
                                 # Estado
                                 if diff == 0.0:
-                                    estado = "✓ OK"
+                                    count_m = sum(1 for x in mendez_detalle if str(x.get('CUIT', '')).replace('-', '') == ck)
+                                    count_a = sum(1 for r in registros_activos if r['cuit_limpio'] == ck)
+                                    if count_m == 0 and count_a > 0:
+                                        estado = "⚠ Falta en Mendez"
+                                    elif count_a == 0 and count_m > 0:
+                                        estado = f"⚠ Falta en {organismo}"
+                                    elif count_m != count_a:
+                                        estado = "⚠ Diferencia"
+                                    else:
+                                        estado = "✓ OK"
                                 elif m_mendez == 0.0:
                                     estado = "⚠ Falta en Mendez"
                                 elif m_arba == 0.0:
@@ -3868,29 +3877,32 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 m_mendez = mendez_por_cuit.get(ck, 0.0)
                                 m_arba   = arba_por_cuit.get(ck, 0.0)
                                 diff     = round(m_arba - m_mendez, 2)
-                                if diff != 0.0:
+                                t_men = [x for x in mendez_detalle if str(x.get('CUIT','')).replace('-','') == ck]
+                                t_arb = [x for x in arba_detalle_list if str(x.get('CUIT','')).replace('-','') == ck]
+                                if diff != 0.0 or len(t_men) != len(t_arb):
                                     cuit_fmt = f"{ck[:2]}-{ck[2:10]}-{ck[10]}" if len(ck) == 11 else ck
 
-                                    t_men = [x for x in mendez_detalle if str(x.get('CUIT','')).replace('-','') == ck]
-                                    t_arb = [x for x in arba_detalle_list if str(x.get('CUIT','')).replace('-','') == ck]
-
-                                    # Cancelar importes que coincidan en ambos lados (multiset)
+                                    # Cancelar comprobantes que coincidan en NRO + MONTO entre ambos lados
                                     from collections import Counter
-                                    montos_men = Counter(round(x.get('Monto', 0), 2) for x in t_men)
-                                    montos_arb = Counter(round(x.get('Monto', 0), 2) for x in t_arb)
+                                    def _clave_comp(x):
+                                        return (str(x.get('Nro', '')), round(x.get('Monto', 0), 2))
+
+                                    claves_men = Counter(_clave_comp(x) for x in t_men)
+                                    claves_arb = Counter(_clave_comp(x) for x in t_arb)
                                     cancelados_men = Counter()
                                     cancelados_arb = Counter()
-                                    for monto, cnt_m in montos_men.items():
-                                        cnt_a = montos_arb.get(monto, 0)
+                                    for clave, cnt_m in claves_men.items():
+                                        cnt_a = claves_arb.get(clave, 0)
                                         cancelados = min(cnt_m, cnt_a)
-                                        cancelados_men[monto] = cancelados
-                                        cancelados_arb[monto] = cancelados
+                                        if cancelados > 0:
+                                            cancelados_men[clave] = cancelados
+                                            cancelados_arb[clave] = cancelados
 
                                     usados_men = Counter()
                                     for t in t_men:
-                                        m = round(t.get('Monto', 0), 2)
-                                        if usados_men[m] < cancelados_men[m]:
-                                            usados_men[m] += 1
+                                        clave = _clave_comp(t)
+                                        if usados_men[clave] < cancelados_men[clave]:
+                                            usados_men[clave] += 1
                                             continue  # cancelado
                                         t_copy = t.copy()
                                         t_copy['CUIT'] = cuit_fmt
@@ -3898,9 +3910,9 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
 
                                     usados_arb = Counter()
                                     for t in t_arb:
-                                        m = round(t.get('Monto', 0), 2)
-                                        if usados_arb[m] < cancelados_arb[m]:
-                                            usados_arb[m] += 1
+                                        clave = _clave_comp(t)
+                                        if usados_arb[clave] < cancelados_arb[clave]:
+                                            usados_arb[clave] += 1
                                             continue  # cancelado
                                         t_copy = t.copy()
                                         t_copy['CUIT'] = cuit_fmt
@@ -4270,7 +4282,7 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                     ws2.cell(row=row_i, column=idx_match_arba).value = (
                                         f'=IF(COUNTIF(B{row_i}, "*(SUBTOTAL)*")>0, '
                                         f'IFERROR(VLOOKUP(A{row_i}, \'Cruce x CUIT\'!$A$6:$F${len(cuits_sorted)+5}, 6, 0), ""), '
-                                        f'IF(COUNTIFS(\'Detalle Mendez\'!$A:$A, A{row_i}, \'Detalle Mendez\'!$G:$G, G{row_i})>0, "✓ Ok", "⚠ Falta en Mendez"))'
+                                        f'IF(COUNTIFS(\'Detalle Mendez\'!$A:$A, A{row_i}, \'Detalle Mendez\'!$F:$F, F{row_i}, \'Detalle Mendez\'!$G:$G, G{row_i})>0, "✓ Ok", "⚠ Falta en Mendez"))'
                                     )
                                     ws2.cell(row=row_i, column=idx_cant_arba).value = (
                                         f'=IF(COUNTIF(B{row_i}, "*(SUBTOTAL)*")>0, '
@@ -4358,7 +4370,7 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                     ws3.cell(row=row_i, column=idx_match_men).value = (
                                         f'=IF(COUNTIF(B{row_i}, "*(SUBTOTAL)*")>0, '
                                         f'IFERROR(VLOOKUP(A{row_i}, \'Cruce x CUIT\'!$A$6:$F${len(cuits_sorted)+5}, 6, 0), ""), '
-                                        f'IF(COUNTIFS(\'Detalle {organismo}\'!$A:$A, A{row_i}, \'Detalle {organismo}\'!$G:$G, G{row_i})>0, "✓ Ok", "⚠ Falta en {organismo}"))'
+                                        f'IF(COUNTIFS(\'Detalle {organismo}\'!$A:$A, A{row_i}, \'Detalle {organismo}\'!$F:$F, F{row_i}, \'Detalle {organismo}\'!$G:$G, G{row_i})>0, "✓ Ok", "⚠ Falta en {organismo}"))'
                                     )
                                     ws3.cell(row=row_i, column=idx_cant_men).value = (
                                         f'=IF(COUNTIF(B{row_i}, "*(SUBTOTAL)*")>0, '
