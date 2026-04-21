@@ -3882,41 +3882,39 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 if diff != 0.0 or len(t_men) != len(t_arb):
                                     cuit_fmt = f"{ck[:2]}-{ck[2:10]}-{ck[10]}" if len(ck) == 11 else ck
 
-                                    # Cancelar comprobantes que coincidan en NRO + MONTO entre ambos lados
-                                    from collections import Counter
-                                    def _clave_comp(x):
-                                        return (str(x.get('Nro', '')), round(x.get('Monto', 0), 2))
+                                    # Cancelar comprobantes: va a DE MAS solo si NO encuentra
+                                    # ni el Monto ni el Nro en el otro lado (condición OR).
+                                    # Usa un pool mutable para respetar multiplicidades.
+                                    def _nro(x):  return str(x.get('Nro', ''))
+                                    def _monto(x): return round(x.get('Monto', 0), 2)
 
-                                    claves_men = Counter(_clave_comp(x) for x in t_men)
-                                    claves_arb = Counter(_clave_comp(x) for x in t_arb)
-                                    cancelados_men = Counter()
-                                    cancelados_arb = Counter()
-                                    for clave, cnt_m in claves_men.items():
-                                        cnt_a = claves_arb.get(clave, 0)
-                                        cancelados = min(cnt_m, cnt_a)
-                                        if cancelados > 0:
-                                            cancelados_men[clave] = cancelados
-                                            cancelados_arb[clave] = cancelados
-
-                                    usados_men = Counter()
+                                    pool_arb = list(t_arb)
                                     for t in t_men:
-                                        clave = _clave_comp(t)
-                                        if usados_men[clave] < cancelados_men[clave]:
-                                            usados_men[clave] += 1
-                                            continue  # cancelado
-                                        t_copy = t.copy()
-                                        t_copy['CUIT'] = cuit_fmt
-                                        lista_m_dif.append(t_copy)
+                                        idx = next(
+                                            (i for i, a in enumerate(pool_arb)
+                                             if _monto(a) == _monto(t) or _nro(a) == _nro(t)),
+                                            None
+                                        )
+                                        if idx is not None:
+                                            pool_arb.pop(idx)   # consumido → no va a DE MAS
+                                        else:
+                                            t_copy = t.copy()
+                                            t_copy['CUIT'] = cuit_fmt
+                                            lista_m_dif.append(t_copy)
 
-                                    usados_arb = Counter()
+                                    pool_men = list(t_men)
                                     for t in t_arb:
-                                        clave = _clave_comp(t)
-                                        if usados_arb[clave] < cancelados_arb[clave]:
-                                            usados_arb[clave] += 1
-                                            continue  # cancelado
-                                        t_copy = t.copy()
-                                        t_copy['CUIT'] = cuit_fmt
-                                        lista_a_dif.append(t_copy)
+                                        idx = next(
+                                            (i for i, m in enumerate(pool_men)
+                                             if _monto(m) == _monto(t) or _nro(m) == _nro(t)),
+                                            None
+                                        )
+                                        if idx is not None:
+                                            pool_men.pop(idx)   # consumido → no va a DE MAS
+                                        else:
+                                            t_copy = t.copy()
+                                            t_copy['CUIT'] = cuit_fmt
+                                            lista_a_dif.append(t_copy)
 
 
                             cols_out_men = ['CUIT', 'Proveedor', 'Fecha Emision', 'Tipo Comp.', 'PV', 'Nro', 'Monto']
