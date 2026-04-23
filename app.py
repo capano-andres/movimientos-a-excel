@@ -1433,22 +1433,24 @@ elif herramienta == TOOL_LIQUIDACIONES:
 
                         for linea in texto_lines:
                             if "F.de Pago" in linea:
-                                capturar = False
                                 cbu_match = re.search(r"\d{1,3}(\.\d{3})*,\d+\-?\s+(\d+)", linea)
-                                nro_cbu = cbu_match.group(1) if cbu_match else "No se encontró Número de Liquidación"
-                                # Extraer ambas fechas: Pago y Presentación
-                                # PyPDF2 extrae primero la fecha de presentación y luego la de pago
-                                todas_fechas = re.findall(r"(\d{2}/\d{2}/\d{4})", linea)
-                                fecha_pres = todas_fechas[0] if len(todas_fechas) >= 1 else "No se encontró fecha"
-                                fecha_pago = todas_fechas[-1] if len(todas_fechas) >= 2 else fecha_pres
                                 if cbu_match:
-                                    movimiento["Liquidacion"] = cbu_match.group(2) + ".00"
-                                movimiento["Fecha Pago"] = fecha_pago
-                                movimiento["Fecha Pres."] = fecha_pres
-                                if nro_cbu != "No se encontró Número de Liquidación":
-                                    movimiento["Liquidacion"] = round(float(movimiento["Liquidacion"]))
-                                    movimientos.append(movimiento.copy())
-                                    movimiento = {}
+                                    # Línea de cierre con datos reales de pago → guardar movimiento
+                                    capturar = False
+                                    todas_fechas = re.findall(r"(\d{2}/\d{2}/\d{4})", linea)
+                                    fecha_pres = todas_fechas[0] if len(todas_fechas) >= 1 else "No se encontró fecha"
+                                    fecha_pago = todas_fechas[-1] if len(todas_fechas) >= 2 else fecha_pres
+                                    movimiento["Liquidacion"] = round(float(cbu_match.group(2)))
+                                    movimiento["Fecha Pago"] = fecha_pago
+                                    movimiento["Fecha Pres."] = fecha_pres
+                                    if movimiento.get("Liquidacion"):
+                                        movimientos.append(movimiento.copy())
+                                        movimiento = {}
+                                    capturar = True  # Activar captura para el bloque siguiente
+                                else:
+                                    # Línea de encabezado de bloque (sin datos de pago) → activar captura
+                                    capturar = True
+                                continue  # No procesar líneas F.de Pago como dato
 
                             if "VENTAS" in linea or "QR" in linea or "AJUSTE" in linea or "ACREDITACIONES PAGO QRD" in linea:
                                 capturar = True
@@ -1456,14 +1458,20 @@ elif herramienta == TOOL_LIQUIDACIONES:
                             if capturar:
                                 partes = linea.split("$")
                                 if len(partes) > 1:
+                                    concepto_raw = partes[0].strip()
+                                    # Limpiar el +/- del final del nombre del concepto (notación del formato)
+                                    concepto = concepto_raw.rstrip("+-").strip()
+                                    # Signo: "+" al final del concepto = crédito/reversa = negativo
+                                    #        "-" al final del concepto = deducción normal = positivo
+                                    #        "-" en el valor (formato original FISERV) = negativo
+                                    es_negativo = ("-" in partes[1]) or concepto_raw.endswith("+")
                                     valor = partes[1].strip().replace("Fecha", "").replace("-", "").replace(".", "").replace(",", ".")
-                                    concepto = partes[0].strip()
                                     if "/" not in valor:
                                         try:
-                                            num_val = round(float(valor), 2) * (-1 if "-" in partes[1] else 1)
+                                            num_val = round(float(valor), 2) * (-1 if es_negativo else 1)
                                             if "ACREDITACIONES PAGO QRD" in concepto:
                                                 num_val = -abs(num_val)
-                                            
+
                                             # Sumar si el concepto ya existe en el movimiento
                                             if concepto in movimiento and isinstance(movimiento[concepto], (int, float)):
                                                 movimiento[concepto] += num_val
