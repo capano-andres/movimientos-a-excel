@@ -3875,6 +3875,10 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 for r in registros_activos
                             ]
 
+                            # Índice único por registro para tracking post-matching
+                            for _i, _r in enumerate(mendez_detalle):    _r['_idx'] = _i
+                            for _i, _r in enumerate(arba_detalle_list): _r['_idx'] = _i
+
                             # -------------------------------------------------------------
                             # Matriz de Diferencias (Separada por Mendez y Organismo)
                             # -------------------------------------------------------------
@@ -3890,40 +3894,70 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 if diff != 0.0 or len(t_men) != len(t_arb):
                                     cuit_fmt = f"{ck[:2]}-{ck[2:10]}-{ck[10]}" if len(ck) == 11 else ck
 
-                                    # Cancelar comprobantes: va a DE MAS solo si NO encuentra
-                                    # ni el Monto ni el Nro en el otro lado (condición OR).
-                                    # Usa un pool mutable para respetar multiplicidades.
-                                    def _nro(x):  return str(x.get('Nro', ''))
+                                    # Cancelar comprobantes en dos fases:
+                                    # Fase 1: priorizar coincidencia por Nro (tolera que IVA XLS
+                                    #         guarde PV+Nro juntos, ej: 11700025262 vs 25262).
+                                    # Fase 2: fallback por monto para los sin pareja por Nro.
+                                    def _nro(x):   return str(x.get('Nro', ''))
                                     def _monto(x): return round(x.get('Monto', 0), 2)
 
+                                    def _nro_match(a, b):
+                                        sa, sb = str(a).lstrip('0'), str(b).lstrip('0')
+                                        if not sa or not sb: return sa == sb
+                                        if sa == sb: return True
+                                        # Suffix match con mínimo 5 chars para evitar falsos positivos
+                                        if len(sa) >= 5 and sb.endswith(sa): return True
+                                        if len(sb) >= 5 and sa.endswith(sb): return True
+                                        return False
+
+                                    # ── Dirección Mendez → Organismo ──────────────────────
                                     pool_arb = list(t_arb)
+                                    sin_nro_men = []
                                     for t in t_men:
-                                        idx = next(
-                                            (i for i, a in enumerate(pool_arb)
-                                             if _monto(a) == _monto(t) or _nro(a) == _nro(t)),
-                                            None
-                                        )
+                                        idx = next((i for i, a in enumerate(pool_arb)
+                                                    if _nro_match(_nro(a), _nro(t))), None)
                                         if idx is not None:
-                                            pool_arb.pop(idx)   # consumido → no va a DE MAS
+                                            pool_arb.pop(idx)
+                                        else:
+                                            sin_nro_men.append(t)
+                                    for t in sin_nro_men:
+                                        idx = next((i for i, a in enumerate(pool_arb)
+                                                    if _monto(a) == _monto(t)), None)
+                                        if idx is not None:
+                                            pool_arb.pop(idx)
                                         else:
                                             t_copy = t.copy()
                                             t_copy['CUIT'] = cuit_fmt
                                             lista_m_dif.append(t_copy)
 
+                                    # ── Dirección Organismo → Mendez ──────────────────────
                                     pool_men = list(t_men)
+                                    sin_nro_org = []
                                     for t in t_arb:
-                                        idx = next(
-                                            (i for i, m in enumerate(pool_men)
-                                             if _monto(m) == _monto(t) or _nro(m) == _nro(t)),
-                                            None
-                                        )
+                                        idx = next((i for i, m in enumerate(pool_men)
+                                                    if _nro_match(_nro(m), _nro(t))), None)
                                         if idx is not None:
-                                            pool_men.pop(idx)   # consumido → no va a DE MAS
+                                            pool_men.pop(idx)
+                                        else:
+                                            sin_nro_org.append(t)
+                                    for t in sin_nro_org:
+                                        idx = next((i for i, m in enumerate(pool_men)
+                                                    if _monto(m) == _monto(t)), None)
+                                        if idx is not None:
+                                            pool_men.pop(idx)
                                         else:
                                             t_copy = t.copy()
                                             t_copy['CUIT'] = cuit_fmt
                                             lista_a_dif.append(t_copy)
 
+
+                            # Estado por registro: ✓ Ok si fue emparejado, ⚠ Falta si quedó sin par
+                            _unmatched_men_idx = {r['_idx'] for r in lista_m_dif if '_idx' in r}
+                            _unmatched_arb_idx = {r['_idx'] for r in lista_a_dif if '_idx' in r}
+                            for rec in mendez_detalle:
+                                rec['_estado'] = f'⚠ Falta en {organismo}' if rec.get('_idx') in _unmatched_men_idx else '✓ Ok'
+                            for rec in arba_detalle_list:
+                                rec['_estado'] = '⚠ Falta en Mendez' if rec.get('_idx') in _unmatched_arb_idx else '✓ Ok'
 
                             cols_out_men = ['CUIT', 'Proveedor', 'Fecha Emision', 'Tipo Comp.', 'PV', 'Nro', 'Monto']
                             cols_out_org = ['CUIT', 'Proveedor', 'Fecha Emision', 'Tipo Comp.', _pv_col_lbl, 'Nro', 'Monto']
@@ -3936,12 +3970,18 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
 
                             if df_mendez_det.empty:
                                 df_mendez_det = pd.DataFrame(columns=['CUIT', 'Proveedor', 'Fecha Emision', 'Tipo Comp.', 'PV', 'Nro', 'Monto'])
-                            df_mendez_det['Estado'] = ''
+                                df_mendez_det['Estado'] = ''
+                            else:
+                                df_mendez_det['Estado'] = df_mendez_det['_estado'].fillna('').astype(str).replace('nan', '')
+                                df_mendez_det.drop(columns=['_idx', '_estado'], inplace=True, errors='ignore')
                             df_mendez_det['Cantidad'] = ''
 
                             if df_arba_det.empty:
                                 df_arba_det = pd.DataFrame(columns=['CUIT', 'Proveedor', 'Fecha Emision', 'Tipo Comp.', 'PV', 'Nro', 'Monto'])
-                            df_arba_det['Estado'] = ''
+                                df_arba_det['Estado'] = ''
+                            else:
+                                df_arba_det['Estado'] = df_arba_det['_estado'].fillna('').astype(str).replace('nan', '')
+                                df_arba_det.drop(columns=['_idx', '_estado'], inplace=True, errors='ignore')
                             df_arba_det['Cantidad'] = ''
 
 
@@ -4284,12 +4324,11 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                         ws2.row_dimensions[row_i].outlineLevel = 1
                                         ws2.row_dimensions[row_i].hidden = True
 
-                                    # Formular Estado y Cantidad
-                                    ws2.cell(row=row_i, column=idx_match_arba).value = (
-                                        f'=IF(COUNTIF(B{row_i}, "*(SUBTOTAL)*")>0, '
-                                        f'IFERROR(VLOOKUP(A{row_i}, \'Cruce x CUIT\'!$A$6:$F${len(cuits_sorted)+5}, 6, 0), ""), '
-                                        f'IF(COUNTIFS(\'Detalle Mendez\'!$A:$A, A{row_i}, \'Detalle Mendez\'!$F:$F, F{row_i}, \'Detalle Mendez\'!$G:$G, G{row_i})>0, "✓ Ok", "⚠ Falta en Mendez"))'
-                                    )
+                                    # Estado: subtotales → VLOOKUP al resumen por CUIT; filas individuales → pre-computado
+                                    if is_sub:
+                                        ws2.cell(row=row_i, column=idx_match_arba).value = (
+                                            f'=IFERROR(VLOOKUP(A{row_i}, \'Cruce x CUIT\'!$A$6:$F${len(cuits_sorted)+5}, 6, 0), "")'
+                                        )
                                     ws2.cell(row=row_i, column=idx_cant_arba).value = (
                                         f'=IF(COUNTIF(B{row_i}, "*(SUBTOTAL)*")>0, '
                                         f'COUNTIFS($A$6:$A${_last_a}, A{row_i}, $B$6:$B${_last_a}, "<>*(SUBTOTAL)*"), '
@@ -4372,12 +4411,11 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                         ws3.row_dimensions[row_i].outlineLevel = 1
                                         ws3.row_dimensions[row_i].hidden = True
 
-                                    # Formula Estado y Cantidad
-                                    ws3.cell(row=row_i, column=idx_match_men).value = (
-                                        f'=IF(COUNTIF(B{row_i}, "*(SUBTOTAL)*")>0, '
-                                        f'IFERROR(VLOOKUP(A{row_i}, \'Cruce x CUIT\'!$A$6:$F${len(cuits_sorted)+5}, 6, 0), ""), '
-                                        f'IF(COUNTIFS(\'Detalle {organismo}\'!$A:$A, A{row_i}, \'Detalle {organismo}\'!$F:$F, F{row_i}, \'Detalle {organismo}\'!$G:$G, G{row_i})>0, "✓ Ok", "⚠ Falta en {organismo}"))'
-                                    )
+                                    # Estado: subtotales → VLOOKUP al resumen por CUIT; filas individuales → pre-computado
+                                    if is_sub:
+                                        ws3.cell(row=row_i, column=idx_match_men).value = (
+                                            f'=IFERROR(VLOOKUP(A{row_i}, \'Cruce x CUIT\'!$A$6:$F${len(cuits_sorted)+5}, 6, 0), "")'
+                                        )
                                     ws3.cell(row=row_i, column=idx_cant_men).value = (
                                         f'=IF(COUNTIF(B{row_i}, "*(SUBTOTAL)*")>0, '
                                         f'COUNTIFS($A$6:$A${_last_m}, A{row_i}, $B$6:$B${_last_m}, "<>*(SUBTOTAL)*"), '
