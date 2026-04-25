@@ -3875,6 +3875,32 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 for r in registros_activos
                             ]
 
+                            # Consolidar registros del organismo que dividen una percepción
+                            # en varios movimientos para el mismo (CUIT, Nro). Excepción: bancos,
+                            # que informan percepciones de forma especial y deben mantenerse separados.
+                            _grupos = {}
+                            _orden = []
+                            for _r in arba_detalle_list:
+                                _prov = str(_r.get('Proveedor', '')).upper()
+                                if 'BANCO' in _prov:
+                                    _key = ('_uniq_', id(_r))
+                                else:
+                                    _key = (str(_r.get('CUIT', '')).replace('-', ''), str(_r.get('Nro', '')))
+                                if _key not in _grupos:
+                                    _grupos[_key] = []
+                                    _orden.append(_key)
+                                _grupos[_key].append(_r)
+                            _consolidados = []
+                            for _k in _orden:
+                                _regs = _grupos[_k]
+                                if len(_regs) == 1:
+                                    _consolidados.append(_regs[0])
+                                else:
+                                    _base = _regs[0].copy()
+                                    _base['Monto'] = round(sum(_x.get('Monto', 0) for _x in _regs), 2)
+                                    _consolidados.append(_base)
+                            arba_detalle_list = _consolidados
+
                             # Índice único por registro para tracking post-matching
                             for _i, _r in enumerate(mendez_detalle):    _r['_idx'] = _i
                             for _i, _r in enumerate(arba_detalle_list): _r['_idx'] = _i
@@ -3915,7 +3941,7 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                     sin_nro_men = []
                                     for t in t_men:
                                         idx = next((i for i, a in enumerate(pool_arb)
-                                                    if _nro_match(_nro(a), _nro(t))), None)
+                                                    if _nro_match(_nro(a), _nro(t)) and _monto(a) == _monto(t)), None)
                                         if idx is not None:
                                             pool_arb.pop(idx)
                                         else:
@@ -3935,7 +3961,7 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                     sin_nro_org = []
                                     for t in t_arb:
                                         idx = next((i for i, m in enumerate(pool_men)
-                                                    if _nro_match(_nro(m), _nro(t))), None)
+                                                    if _nro_match(_nro(m), _nro(t)) and _monto(m) == _monto(t)), None)
                                         if idx is not None:
                                             pool_men.pop(idx)
                                         else:
