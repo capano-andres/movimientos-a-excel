@@ -186,6 +186,70 @@ h1, h2, h3, h4, p, span, div, label {
     border-color: var(--accent) !important;
 }
 
+/* Traducir textos del file uploader al español */
+/* Ocultar todo el texto original dentro del dropzone instructions */
+[data-testid="stFileUploaderDropzoneInstructions"] span,
+[data-testid="stFileUploaderDropzoneInstructions"] small,
+[data-testid="stFileUploaderDropzoneInstructions"] div,
+[data-testid="stFileDropzoneInstructions"] span,
+[data-testid="stFileDropzoneInstructions"] small,
+[data-testid="stFileDropzoneInstructions"] div {
+    font-size: 0 !important;
+    line-height: 0 !important;
+    color: transparent !important;
+}
+/* Restaurar el ícono SVG */
+[data-testid="stFileUploaderDropzoneInstructions"] svg,
+[data-testid="stFileDropzoneInstructions"] svg {
+    font-size: initial !important;
+    line-height: initial !important;
+    color: var(--muted) !important;
+    fill: var(--muted) !important;
+}
+/* Inyectar texto en español en el contenedor principal */
+[data-testid="stFileUploaderDropzoneInstructions"]::after,
+[data-testid="stFileDropzoneInstructions"]::after {
+    content: "Arrastrá y soltá el archivo acá\A Límite de 200MB por archivo";
+    white-space: pre;
+    font-family: 'Syne', sans-serif;
+    font-size: 0.9rem;
+    line-height: 1.4;
+    color: var(--muted) !important;
+    margin-left: 0.8rem;
+    display: inline-block;
+    vertical-align: middle;
+}
+/* Botón "Browse files" → "Buscar archivo" */
+[data-testid="stFileUploader"] button,
+[data-testid="stFileUploaderDropzone"] button {
+    font-size: 0 !important;
+    color: transparent !important;
+    position: relative;
+    min-width: 140px !important;
+    width: auto !important;
+    padding-left: 1rem !important;
+    padding-right: 1rem !important;
+    white-space: nowrap !important;
+}
+[data-testid="stFileUploader"] button *,
+[data-testid="stFileUploaderDropzone"] button * {
+    font-size: 0 !important;
+    color: transparent !important;
+}
+[data-testid="stFileUploader"] button::after,
+[data-testid="stFileUploaderDropzone"] button::after {
+    content: "Buscar archivo";
+    font-size: 0.75rem !important;
+    color: var(--accent) !important;
+    font-family: 'Space Mono', monospace !important;
+    letter-spacing: 0.04em;
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
 /* Checkbox */
 .stCheckbox label span { color: var(--text) !important; }
 [data-testid="stCheckbox"] > label > div {
