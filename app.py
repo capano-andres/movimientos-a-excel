@@ -10,7 +10,7 @@ from pathlib import Path
 from openpyxl.styles import Border, Side, Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 import requests
-from extractor_movimientos import parsear_archivo, crear_excel, generar_sifere_txt, generar_sifere_retenciones_txt, generar_percepciones_arba, generar_arba_desde_excel, generar_retenciones_arba, generar_retenciones_arba_desde_excel, CONCEPTOS_MAP
+from extractor_movimientos import parsear_archivo, crear_excel, generar_sifere_txt, generar_sifere_retenciones_txt, generar_percepciones_arba, generar_arba_desde_excel, generar_retenciones_arba, generar_retenciones_arba_desde_excel, construir_sistema_aux_set, CONCEPTOS_MAP
 
 @st.cache_data(show_spinner=False)
 def obtener_razon_social_cuitonline(cuit):
@@ -404,7 +404,7 @@ st.markdown("""
 
 # ─── Selector de herramienta ────────────────────────────────────────────────────────────
 TOOL_MOVIMIENTOS = "Listado por fecha TXT Mendez a Excel limpio"
-TOOL_PORTAL_IVA = "Movimientos Portal IVA limpio (.zip)"
+TOOL_PORTAL_IVA = "Archivo .zip PORTAL IVA"
 TOOL_SIFERE = "Archivos SIFERE (.txt)"
 TOOL_LIQUIDACIONES = "Liquidaciones Tarjeta FISERV (.pdf)"
 TOOL_DEDUCCIONES = "Limpieza Excel Deducciones IVA/Ganancias"
@@ -481,6 +481,10 @@ if herramienta == TOOL_MOVIMIENTOS:
 
         # ─── Card 02b: Archivo ARCA (condicional) ──────────────────────────────────────
         df_arca = None
+        df_arca_raw = None       # CSV crudo (str), para round-trip a .zip de faltantes
+        arca_csv_basename = None # Nombre del CSV interno del .zip
+        arca_sep = None          # Separator del CSV original
+        arca_zip_name = None     # Nombre del .zip subido
         if cruce_arca:
             st.markdown('<div class="card"><div class="card-label">02b · Archivo ARCA (.zip)</div>', unsafe_allow_html=True)
             uploaded_arca = st.file_uploader(
@@ -502,6 +506,14 @@ if herramienta == TOOL_MOVIMIENTOS:
                             df_arca = pd.read_csv(
                                 io.StringIO(csv_text), sep=sep, on_bad_lines='skip'
                             )
+                            # Vista cruda para round-trip al .zip de faltantes
+                            df_arca_raw = pd.read_csv(
+                                io.StringIO(csv_text), sep=sep,
+                                dtype=str, keep_default_na=False, on_bad_lines='skip'
+                            )
+                            arca_csv_basename = target_file
+                            arca_sep = sep
+                            arca_zip_name = uploaded_arca.name
                             # Mapear códigos de comprobante ARCA a tipos del sistema (con letra)
                             ARCA_TIPO_MAP = {
                                 # Facturas
@@ -721,6 +733,36 @@ if herramienta == TOOL_MOVIMIENTOS:
                             use_container_width=True,
                         )
 
+                        # ── Cruce ARCA: .zip de comprobantes faltantes (mismo formato que ARCA) ──
+                        if cruce_arca and df_arca is not None and df_arca_raw is not None and 'Auxiliar' in df_arca.columns:
+                            sistema_aux_set = construir_sistema_aux_set(transacciones)
+                            mask_falt = ~df_arca['Auxiliar'].astype(str).isin(sistema_aux_set)
+                            falt_idx = df_arca.index[mask_falt]
+                            df_falt_raw = df_arca_raw.loc[df_arca_raw.index.intersection(falt_idx)]
+
+                            if len(df_falt_raw) > 0:
+                                # Serializar a CSV con el mismo separator/encoding del ARCA original
+                                csv_io = io.StringIO()
+                                df_falt_raw.to_csv(csv_io, sep=arca_sep, index=False, lineterminator='\n')
+                                csv_bytes = csv_io.getvalue().encode('latin-1', errors='replace')
+
+                                # Empaquetar en .zip preservando el nombre del CSV interno
+                                zip_buf = io.BytesIO()
+                                with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zout:
+                                    zout.writestr(arca_csv_basename, csv_bytes)
+
+                                # Nombre del .zip de salida: derivado del original
+                                base_zip_name = Path(arca_zip_name).stem if arca_zip_name else 'ARCA'
+                                falt_zip_name = f"{base_zip_name}_FALTANTES.zip"
+
+                                st.download_button(
+                                    label=f"↓  Descargar .zip de Faltantes ({len(df_falt_raw)} comprobantes)",
+                                    data=zip_buf.getvalue(),
+                                    file_name=falt_zip_name,
+                                    mime="application/zip",
+                                    use_container_width=True,
+                                )
+
                 except Exception as e:
                     st.error(f"Error al procesar el archivo: {str(e)}")
                     st.exception(e)
@@ -744,7 +786,7 @@ if herramienta == TOOL_MOVIMIENTOS:
 
 elif herramienta == TOOL_PORTAL_IVA:
     # ───────────────────────────────────────────────────────────────────────────────
-    # HERRAMIENTA: Portal IVA limpio
+    # HERRAMIENTA: Archivo .zip PORTAL IVA (modos: Limpiar / Edición .zip)
     # ───────────────────────────────────────────────────────────────────────────────
     st.markdown('<div class="card"><div class="card-label">01 · Archivo ARCA (.zip)</div>', unsafe_allow_html=True)
     uploaded_zip_iva = st.file_uploader(
@@ -758,11 +800,174 @@ elif herramienta == TOOL_PORTAL_IVA:
     if uploaded_zip_iva:
         st.success(f"**{uploaded_zip_iva.name}** listo para procesar")
 
-        st.markdown('<div class="card"><div class="card-label">02 · Datos del contribuyente</div>', unsafe_allow_html=True)
+        st.markdown('<div class="card"><div class="card-label">02 · Modo</div>', unsafe_allow_html=True)
+        MODO_PORTAL_LIMPIAR = "Limpiar"
+        MODO_PORTAL_EDITAR = "Edición .zip"
+        modo_portal = st.radio(
+            "Elegí qué hacer con el .zip:",
+            options=[MODO_PORTAL_LIMPIAR, MODO_PORTAL_EDITAR],
+            horizontal=True,
+            key="portal_iva_modo",
+            help="Limpiar: genera un Excel formateado con los movimientos. Edición .zip: round-trip a Excel para editar masivamente el CSV de ARCA y devolverlo en su mismo formato .zip."
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        if modo_portal == MODO_PORTAL_EDITAR:
+            # ── Modo Edición .zip: round-trip a Excel ─────────────────────────
+            EDIT_DATOS_SHEET = "Comprobantes"
+            EDIT_META_SHEET = "_meta"
+
+            st.markdown('<div class="card"><div class="card-label">03 · Generar Excel para edición</div>', unsafe_allow_html=True)
+            st.caption(
+                "Genera un .xlsx con todas las filas y columnas del CSV interno del .zip. "
+                "Editalo en Excel (sort, filter, autofill, Ctrl+Enter, fórmulas, copy/paste de rangos), "
+                "después subilo en el paso 04 y la app rearma el .zip con el formato original."
+            )
+
+            source_id_edit = f"{uploaded_zip_iva.name}|{uploaded_zip_iva.size}"
+            if st.session_state.get('edit_source_id') != source_id_edit:
+                st.session_state['edit_source_id'] = source_id_edit
+                st.session_state.pop('edit_xlsx_bytes', None)
+                st.session_state.pop('edit_xlsx_name', None)
+
+            if st.button("⬡  Generar Excel editable", use_container_width=True, key='edit_btn_make_xlsx'):
+                try:
+                    from openpyxl.styles import Font, PatternFill, Alignment
+                    from openpyxl.utils import get_column_letter
+
+                    with st.spinner("Leyendo ZIP..."):
+                        with zipfile.ZipFile(io.BytesIO(uploaded_zip_iva.getvalue())) as zf_in:
+                            archivos_in = [f for f in zf_in.namelist() if not f.endswith('/')]
+                            if not archivos_in:
+                                st.error("El .zip está vacío.")
+                                st.stop()
+                            target_in = archivos_in[0]
+                            raw_in = zf_in.open(target_in).read()
+
+                    csv_text_in = raw_in.decode('latin-1')
+                    sep_in = ';' if csv_text_in.count(';') > csv_text_in.count(',') else ','
+                    df_in = pd.read_csv(
+                        io.StringIO(csv_text_in),
+                        sep=sep_in,
+                        dtype=str,
+                        keep_default_na=False,
+                        na_values=[],
+                        on_bad_lines='skip',
+                    )
+
+                    with st.spinner("Generando Excel..."):
+                        wb_e = openpyxl.Workbook()
+                        ws_e = wb_e.active
+                        ws_e.title = EDIT_DATOS_SHEET
+                        cols_in = list(df_in.columns)
+                        ws_e.append(cols_in)
+
+                        header_fill_e = PatternFill(start_color="1F2937", end_color="1F2937", fill_type="solid")
+                        header_font_e = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+                        header_align_e = Alignment(horizontal="center", vertical="center")
+                        for col_idx in range(1, len(cols_in) + 1):
+                            cell = ws_e.cell(row=1, column=col_idx)
+                            cell.fill = header_fill_e
+                            cell.font = header_font_e
+                            cell.alignment = header_align_e
+
+                        for _, row in df_in.iterrows():
+                            ws_e.append([row[c] for c in cols_in])
+
+                        ws_e.freeze_panes = "A2"
+                        for i, col_name in enumerate(cols_in, start=1):
+                            sample_len = max([len(str(col_name))] + [len(str(v)) for v in df_in[col_name].head(50)])
+                            ws_e.column_dimensions[get_column_letter(i)].width = min(max(sample_len + 2, 10), 40)
+
+                        ws_meta_e = wb_e.create_sheet(EDIT_META_SHEET)
+                        ws_meta_e.append(["csv_basename", Path(target_in).name])
+                        ws_meta_e.append(["sep", sep_in])
+                        ws_meta_e.append(["zip_basename", Path(uploaded_zip_iva.name).name])
+                        ws_meta_e.sheet_state = "hidden"
+
+                        out_xlsx_e = io.BytesIO()
+                        wb_e.save(out_xlsx_e)
+                        st.session_state['edit_xlsx_bytes'] = out_xlsx_e.getvalue()
+                        st.session_state['edit_xlsx_name'] = f"{Path(uploaded_zip_iva.name).stem}_EDITAR.xlsx"
+
+                    st.success(f"Excel generado · {len(df_in)} filas · {len(cols_in)} columnas")
+                except Exception as e:
+                    st.error(f"Error al generar el Excel: {e}")
+
+            if 'edit_xlsx_bytes' in st.session_state:
+                st.download_button(
+                    label=f"↓  Descargar {st.session_state['edit_xlsx_name']}",
+                    data=st.session_state['edit_xlsx_bytes'],
+                    file_name=st.session_state['edit_xlsx_name'],
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key='edit_btn_download_xlsx',
+                )
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            st.markdown('<div class="card"><div class="card-label">04 · Subir Excel editado</div>', unsafe_allow_html=True)
+            uploaded_xlsx_edit = st.file_uploader(
+                "Subí el Excel editado para reconstruir el .zip",
+                type=["xlsx"],
+                key="edit_xlsx_upload"
+            )
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            if uploaded_xlsx_edit is not None:
+                st.markdown('<div class="card"><div class="card-label">05 · Generar .zip modificado</div>', unsafe_allow_html=True)
+                if st.button("⬡  Generar .zip modificado", use_container_width=True, key='edit_btn_gen_zip'):
+                    try:
+                        xlsx_bytes_e = uploaded_xlsx_edit.getvalue()
+
+                        try:
+                            df_meta_e = pd.read_excel(
+                                io.BytesIO(xlsx_bytes_e),
+                                sheet_name=EDIT_META_SHEET,
+                                header=None, dtype=str, keep_default_na=False,
+                            )
+                            meta_dict_e = dict(zip(df_meta_e.iloc[:, 0], df_meta_e.iloc[:, 1]))
+                            sep_out = meta_dict_e.get('sep', ';')
+                            csv_basename_out = meta_dict_e.get('csv_basename', 'comprobantes.csv')
+                            zip_basename_out = meta_dict_e.get('zip_basename', 'modificado.zip')
+                        except Exception:
+                            st.error(f"El Excel no contiene la hoja `{EDIT_META_SHEET}` con la metadata. Asegurate de subir el archivo generado por esta misma herramienta.")
+                            st.stop()
+
+                        df_out = pd.read_excel(
+                            io.BytesIO(xlsx_bytes_e),
+                            sheet_name=EDIT_DATOS_SHEET,
+                            dtype=str, keep_default_na=False,
+                        )
+
+                        csv_io_out = io.StringIO()
+                        df_out.to_csv(csv_io_out, sep=sep_out, index=False, lineterminator='\n')
+                        csv_bytes_out = csv_io_out.getvalue().encode('latin-1', errors='replace')
+
+                        zip_buf_out = io.BytesIO()
+                        with zipfile.ZipFile(zip_buf_out, 'w', zipfile.ZIP_DEFLATED) as zout_e:
+                            zout_e.writestr(csv_basename_out, csv_bytes_out)
+
+                        nombre_zip_out = f"{Path(zip_basename_out).stem}_EDITADO.zip"
+                        st.success(f".zip generado · {len(df_out)} filas · CSV interno: {csv_basename_out}")
+                        st.download_button(
+                            label=f"↓  Descargar {nombre_zip_out}",
+                            data=zip_buf_out.getvalue(),
+                            file_name=nombre_zip_out,
+                            mime="application/zip",
+                            use_container_width=True,
+                            key='edit_btn_download_zip',
+                        )
+                    except Exception as e:
+                        st.error(f"Error al reconstruir el .zip: {e}")
+                st.markdown('</div>', unsafe_allow_html=True)
+
+            st.stop()
+
+        st.markdown('<div class="card"><div class="card-label">03 · Datos del contribuyente</div>', unsafe_allow_html=True)
         nombre_contribuyente = st.text_input("Nombre / Razón Social del contribuyente", value="", key="nombre_portal_iva")
         st.markdown('</div>', unsafe_allow_html=True)
 
-        st.markdown('<div class="card"><div class="card-label">03 · Procesar</div>', unsafe_allow_html=True)
+        st.markdown('<div class="card"><div class="card-label">04 · Procesar</div>', unsafe_allow_html=True)
 
         if st.button("⬡  Procesar ZIP"):
             if not nombre_contribuyente.strip():
@@ -4553,6 +4758,21 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
         """, unsafe_allow_html=True)
 
 elif herramienta == TOOL_IMPORTACION:
+    def _slug_concepto_imp(desc: str) -> str:
+        s = re.sub(r'[\\/:*?"<>|]', '', desc).strip()
+        s = re.sub(r'\s+', '_', s)
+        return s or 'Concepto'
+
+    def _localizar_cuit_col_imp(df):
+        for c in df.columns:
+            cl = c.strip().lower()
+            if ('nro' in cl or 'mero' in cl) and 'doc' in cl and ('vendedor' in cl or 'comprador' in cl):
+                return c
+        for c in df.columns:
+            if c.strip().lower() == 'cuit':
+                return c
+        return None
+
     st.markdown('<div class="card"><div class="card-label">01 · Archivo TXT Mendez</div>', unsafe_allow_html=True)
     uploaded_txt_imp = st.file_uploader(
         "Subí el TXT/PRN de movimientos del sistema Mendez",
@@ -4583,7 +4803,6 @@ elif herramienta == TOOL_IMPORTACION:
                     st.error("No se encontraron transacciones en el TXT Mendez.")
                     st.stop()
 
-                # Concepto más frecuente por proveedor (CUIT)
                 cuit_counters = {}
                 for t in transacciones_imp:
                     cuit_norm = re.sub(r'[^0-9]', '', str(t.get('CUIT') or ''))
@@ -4599,7 +4818,6 @@ elif herramienta == TOOL_IMPORTACION:
                     for cuit, counter in cuit_counters.items()
                 }
 
-                # Leer CSV crudo del ZIP de ARCA
                 with st.spinner("Leyendo ZIP de ARCA..."):
                     with zipfile.ZipFile(io.BytesIO(uploaded_arca_imp.getvalue())) as zf_in:
                         archivos_arca = [f for f in zf_in.namelist() if not f.endswith('/')]
@@ -4620,18 +4838,7 @@ elif herramienta == TOOL_IMPORTACION:
                     on_bad_lines='skip',
                 )
 
-                # Localizar columna del CUIT del proveedor
-                cuit_col_arca = None
-                for c in df_arca_raw.columns:
-                    cl = c.strip().lower()
-                    if ('nro' in cl or 'mero' in cl) and 'doc' in cl and ('vendedor' in cl or 'comprador' in cl):
-                        cuit_col_arca = c
-                        break
-                if cuit_col_arca is None:
-                    for c in df_arca_raw.columns:
-                        if c.strip().lower() == 'cuit':
-                            cuit_col_arca = c
-                            break
+                cuit_col_arca = _localizar_cuit_col_imp(df_arca_raw)
                 if cuit_col_arca is None:
                     st.error("No se encontró la columna de CUIT del proveedor en el CSV de ARCA.")
                     st.stop()
@@ -4641,18 +4848,11 @@ elif herramienta == TOOL_IMPORTACION:
                 )
                 df_arca_raw['_concepto'] = df_arca_raw['_cuit_norm'].map(concepto_por_cuit)
 
-                # Periodo para nombrar el contenedor
                 periodo_meta = (meta_imp.get('periodo') or '').strip()
                 m_per = re.search(r'(\d{2})/(\d{4})', periodo_meta)
                 periodo_tag = f"{m_per.group(2)}{m_per.group(1)}" if m_per else "Periodo"
                 csv_basename = Path(target_arca).name
 
-                def _slug_concepto(desc: str) -> str:
-                    s = re.sub(r'[\\/:*?"<>|]', '', desc).strip()
-                    s = re.sub(r'\s+', '_', s)
-                    return s or 'Concepto'
-
-                # Generar ZIP contenedor con un ZIP por concepto
                 container_buf = io.BytesIO()
                 stats_rows = []
                 with zipfile.ZipFile(container_buf, 'w', zipfile.ZIP_DEFLATED) as zout:
@@ -4668,7 +4868,7 @@ elif herramienta == TOOL_IMPORTACION:
                         else:
                             cod_str = str(int(concepto_val)) if isinstance(concepto_val, (int, float)) and not pd.isna(concepto_val) else str(concepto_val)
                             descripcion = CONCEPTOS_MAP.get(cod_str, f'Concepto {cod_str}')
-                            slug = _slug_concepto(descripcion)
+                            slug = _slug_concepto_imp(descripcion)
                             zip_name = f"Concepto_{cod_str}_{slug}.zip"
                             label = f"{cod_str} · {descripcion}"
 

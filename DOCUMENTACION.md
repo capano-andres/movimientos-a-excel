@@ -53,7 +53,7 @@ graph TD
     subgraph "Frontend - app.py"
         A[Streamlit UI] --> B[Selector de Herramienta]
         B --> H1["1. Listado TXT → Excel"]
-        B --> H2["2. Portal IVA ZIP → Excel"]
+        B --> H2["2. Archivo .zip PORTAL IVA (Limpiar / Edición .zip)"]
         B --> H3["3. SIFERE TXT"]
         B --> H4["4. ARBA TXT"]
         B --> H5["5. Liquidaciones PDF → Excel"]
@@ -271,6 +271,17 @@ stateDiagram-v2
 
 ---
 
+### Helper `construir_sistema_aux_set()`
+
+[extractor_movimientos.py:L334-L355](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/extractor_movimientos.py#L334-L355)
+
+**Entrada:** `transacciones: list[dict]` (la lista devuelta por `parsear_archivo()`).
+**Salida:** `set[str]` con las claves Auxiliar del SISTEMA con formato `Tipo + ' ' + Letra + PV + Nro + CUIT` (sin espacios entre los últimos cuatro), iguales a las que `crear_excel()` arma internamente para cruzar contra el Auxiliar de ARCA.
+
+Es un helper de módulo expuesto para que `app.py` pueda calcular el set sin re-correr la generación de Excel. Lo usa la herramienta 1 modo Cruce ARCA al armar el `.zip de Faltantes`: con este set se identifican las filas de ARCA que no tienen contraparte en el SISTEMA y se reempaquetan en un .zip byte-equivalente al original.
+
+---
+
 ### Función `crear_excel()`
 
 [extractor_movimientos.py:L356-L1791](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/extractor_movimientos.py#L356-L1791)
@@ -429,14 +440,59 @@ Esto reinicia el saldo cuando cambia el proveedor.
 
 ##### 8. Hoja **Asiento Contable**
 
-[extractor_movimientos.py:L1456-L1578](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/extractor_movimientos.py#L1456-L1578)
+[extractor_movimientos.py:L1456-L1700](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/extractor_movimientos.py#L1456-L1700)
 
-Genera un pre-asiento contable con 3 columnas (DESCRIPCIÓN, DEBE, HABER):
+Genera un pre-asiento contable con 3 columnas (DESCRIPCIÓN, DEBE, HABER).
 
-1. **DEBE**: Una fila por cada concepto con su neto total, luego IVA total, luego cada deducción individualmente
-2. **HABER**: 
-   - `a PROVEEDORES` = SUM(DEBE) - DEUDORES
-   - `a DEUDORES POR VENTAS` = Suma de retenciones fiscales (RET.* excluyendo SIRCREB y Bancarias)
+La hoja arranca con **3 filas de encabezado mergeadas** (idénticas a las de la hoja Movimientos):
+
+| Fila | Contenido |
+|------|-----------|
+| 1 | Razón social en mayúsculas (azul oscuro fondo blanco) |
+| 2 | `{tipo_reporte} - ASIENTO CONTABLE` (rojo oscuro) |
+| 3 | `CUIT: {cuit_empresa} \| Periodo: {periodo}` |
+
+Recién en la fila 5 aparecen los headers `DESCRIPCIÓN / DEBE / HABER`.
+
+**Detección automática de modo** desde `meta['tipo_reporte']`:
+- `IVA COMPRAS` → asiento estilo compras (lógica original).
+- `IVA VENTAS` → asiento estilo ventas (rama nueva).
+
+> [!NOTE]
+> Las NCs invierten signos antes de llegar al asiento ([extractor_movimientos.py:L521-L526](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/extractor_movimientos.py#L521-L526)), por lo que los netos e IVA agregados que aparecen en el asiento principal ya son **FC − NC**.
+
+###### Modo Compras
+
+1. **DEBE**: Una fila por cada concepto con su neto total, luego IVA total, luego cada deducción individualmente.
+2. **HABER**:
+   - `a PROVEEDORES` = `SUM(DEBE) − DEUDORES`.
+   - `a DEUDORES POR VENTAS` = suma de las filas DEBE que son retenciones fiscales: contienen `RET` en el nombre **y excluyen** SIRCREB, SIRTAC, y nombres que contengan `BCO` o `BANCO`. Las exclusiones cubren regímenes que no van a Deudores (SIRCREB/SIRTAC son retenciones bancarias automatizadas y los regímenes con `BCO`/`BANCO` son retenciones bancarias que tampoco corresponden).
+
+###### Modo Ventas
+
+Estructura invertida — el receivable arriba, las contracuentas abajo:
+
+1. `DEUDORES POR VENTAS` en DEBE (col B) con fórmula `=SUM(C{first}:C{last})` referenciando el rango HABER que viene a continuación.
+2. **HABER** (col C):
+   - Una fila `A {DESCRIPCION}` por cada concepto con su neto neteado FC−NC. Las descripciones se toman de `CONCEPTOS_MAP` (típicamente conceptos 80-107 de ventas).
+   - `A IVA DEBITO` con la suma neta del IVA.
+   - Una fila `A {nombre}` por cada percepción IIBB efectuada del período.
+
+Las filas RET no se emiten en modo ventas porque no son típicas de un libro de ventas (las retenciones aparecen en compras).
+
+###### Asiento de Restitución (ambos modos)
+
+Después del asiento principal, **sólo si el período tiene IVA de NCs**, se agrega un segundo asiento que contabiliza la restitución del IVA correspondiente a las Notas de Crédito. El IVA de NCs se calcula como `abs(SUM(IVA))` filtrando filas con `Tipo == 'NC'`.
+
+**Modo Ventas** — `RESTITUCION DE DEBITO`:
+- DEBE: `CREDITO FISCAL IVA` = `abs(IVA NCs)`.
+- HABER: `A DEBITO FISCAL IVA` con fórmula `=B{restit_row}` para que ambos importes queden acoplados ante ediciones manuales.
+
+**Modo Compras** — `RESTITUCION DE CREDITO`:
+- DEBE: `DEBITO FISCAL IVA` = `abs(IVA NCs)`.
+- HABER: `A CREDITO FISCAL IVA` con la misma fórmula `=B{restit_row}`.
+
+Si no hay NCs en el período, el bloque de Restitución no se escribe.
 
 ##### 9-11. Hojas de cruce ARCA
 
@@ -556,14 +612,19 @@ La aplicación tiene un tema oscuro personalizado ("dark mode premium") con vari
 - **Solo Movimientos**: Solo la hoja principal con una fila por comprobante
 - **Con Auxiliar**: Agrega columna con fórmula de concatenación para cruce manual
 - **Con Resúmenes**: Agrega 6 hojas de resúmenes con fórmulas interactivas
-- **Cruce ARCA**: Genera hojas SISTEMA/ARCA con VLOOKUP + diferencias
+- **Cruce ARCA**: Genera hojas SISTEMA/ARCA con VLOOKUP + diferencias **y, además del Excel, ofrece un segundo botón de descarga `↓ Descargar .zip de Faltantes (N comprobantes)`** que reempaqueta sólo las filas de ARCA que no aparecen en SISTEMA en un `.zip` **byte-equivalente** al original (mismo encoding `latin-1`, mismo separator, mismo nombre de CSV interno, mismas columnas crudas) — apto para alimentar la herramienta 10 (Importación Compras) o re-importar al sistema Mendez/Portal IVA sin retoques. Si no hay faltantes, el botón no aparece.
 - **Asiento Contable**: Agrega hoja de pre-asiento contable
 
-#### 2. Movimientos Portal IVA limpio (.zip)
+> [!NOTE]
+> **Round-trip del .zip de Faltantes**: al subir el .zip de ARCA, la app parsea el CSV interno **dos veces** desde el mismo `csv_text`: una con la limpieza/renombrado habitual (que alimenta el Excel) y otra "cruda" con `pd.read_csv(..., dtype=str, keep_default_na=False)` para preservar valores como strings sin reformateo. Después del cruce, las filas faltantes se identifican por la columna Auxiliar de la vista renombrada y se mapean por índice a la vista cruda, que se reserializa con el mismo `sep` y `lineterminator='\n'` y se empaqueta con el `csv_basename` original. El helper que arma el set Auxiliar del SISTEMA es `construir_sistema_aux_set(transacciones)` ([extractor_movimientos.py](extractor_movimientos.py)).
 
-[app.py:L710-L1034](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L710-L1034)
+#### 2. Archivo .zip PORTAL IVA
 
-Procesa los CSV exportados del **Portal IVA de ARCA** (comprimidos en .zip). A diferencia de la herramienta 1, no usa el parser de TXT Mendez sino que lee CSV directamente.
+Recibe el `.zip` exportado del **Portal IVA de ARCA** y, según el modo elegido, lo limpia a Excel o lo abre para edición masiva en Excel y lo reempaqueta. Tiene **dos modos** seleccionables vía radio button.
+
+##### Modo A — Limpiar
+
+Procesa los CSV exportados del Portal IVA y genera un Excel formateado con los movimientos. No usa el parser de TXT Mendez — lee el CSV directamente.
 
 **Proceso:**
 1. Extrae el CSV del ZIP (encoding latin-1)
@@ -574,7 +635,33 @@ Procesa los CSV exportados del **Portal IVA de ARCA** (comprimidos en .zip). A d
 6. Elimina columnas monetarias todo-cero
 7. Genera Excel estilizado con fórmula TOTAL
 
-**Detección de tipo (Compras/Ventas):** Se extrae del nombre del ZIP (`VENTA` o `COMPRA` en el nombre)
+**Detección de tipo (Compras/Ventas):** Se extrae del nombre del ZIP (`VENTA` o `COMPRA` en el nombre).
+
+##### Modo B — Edición .zip (round-trip a Excel)
+
+Permite editar masivamente el CSV de ARCA en Excel real (sort, filter, autofill, Ctrl+Enter, fórmulas, copy/paste de rangos) y devuelve un `.zip` con la misma estructura que el original — apto para volver a usar en cualquier herramienta que consuma el .zip de ARCA.
+
+**Flujo (3 cards):**
+
+1. **Card 03 — Generar Excel para edición:** lee el CSV del ZIP con `pd.read_csv(dtype=str, keep_default_na=False)` para preservar valores como strings sin reformateo numérico, arma un `.xlsx` con dos hojas:
+   - `Comprobantes` (visible) con todas las filas y columnas tal cual el CSV original. Header oscuro, `freeze_panes='A2'`, anchos auto-ajustados.
+   - `_meta` (oculta, `sheet_state='hidden'`): pares clave-valor con `csv_basename` (nombre del CSV interno), `sep` (separator detectado) y `zip_basename` (nombre del ZIP original) — para reconstruir el `.zip` idéntico al re-uploadear.
+
+   Los bytes del Excel se persisten en `st.session_state['edit_xlsx_bytes']` para que el botón de descarga sobreviva re-runs.
+
+2. **Card 04 — Subir Excel editado:** `st.file_uploader` con `type=["xlsx"]`.
+
+3. **Card 05 — Generar .zip modificado:**
+   - Lee la hoja `_meta` para recuperar `sep`, `csv_basename`, `zip_basename`. Si no existe → error claro ("subí el archivo generado por esta misma herramienta").
+   - Lee la hoja `Comprobantes` con `dtype=str, keep_default_na=False`.
+   - Serializa a CSV con `df.to_csv(sep=sep, lineterminator='\n')`, encode a `latin-1`.
+   - Empaqueta en `{zip_basename}_EDITADO.zip` con el CSV interno bajo el nombre original.
+
+> [!IMPORTANT]
+> El modo Edición es **agnóstico al contenido**: no clasifica, no agrupa, no analiza — sólo round-trip de bytes. La salida es un `.zip` byte-equivalente al input excepto por las modificaciones que el usuario haya hecho al CSV interno.
+
+> [!WARNING]
+> Si el usuario hace "Guardar como CSV" en Excel, copia las hojas a otro libro, o elimina la hoja `_meta`, la app no puede reconstruir el ZIP y muestra error explícito.
 
 #### 3. Archivos SIFERE (.txt)
 
@@ -808,24 +895,27 @@ El sistema Mendez/ADDISYC importa comprobantes de compras leyendo el CSV de ARCA
 7. Empaqueta todos los `.zip` por concepto **dentro de un único `.zip` contenedor** (`Importacion_Compras_{AAAAMM}.zip`) y se entrega vía `st.download_button`.
 
 > [!NOTE]
-> **Empate de conceptos:** si un proveedor tiene exactamente la misma cantidad de transacciones con dos conceptos distintos, `Counter.most_common(1)` devuelve el primero según el orden de inserción (es decir, el primer concepto encontrado al leer el TXT de arriba hacia abajo).
+> **Empate de conceptos:** si un proveedor tiene exactamente la misma cantidad de transacciones con dos conceptos distintos, `Counter.most_common(1)` devuelve el primero según el orden de inserción (el primer concepto encontrado al leer el TXT de arriba hacia abajo).
+
+> [!TIP]
+> Si necesitás **editar el CSV de ARCA antes de particionar** (por ejemplo: corregir CUITs erróneos, filtrar comprobantes, modificar montos), usá primero el modo **"Edición .zip"** de la herramienta 2 ([Archivo .zip PORTAL IVA](#2-archivo-zip-portal-iva)) para round-trip a Excel, y después usá el `.zip` editado como input de esta herramienta.
 
 **Convención de nombres:**
 
 | Archivo | Nombre |
 |---|---|
-| ZIP por concepto cruzado | `Concepto_{codigo}_{descripcion_slug}.zip` (ej. `Concepto_45_Insumos.zip`) |
+| ZIP por concepto cruzado | `Concepto_{codigo}_{descripcion_slug}.zip` (ej. `Concepto_45_Gastos_de_vehiculo_c_iva.zip`) |
 | ZIP comprobantes sin cruce | `SIN_CONCEPTO.zip` |
 | ZIP contenedor descargable | `Importacion_Compras_{AAAAMM}.zip` |
 | CSV interno de cada ZIP | Mismo nombre que el CSV original dentro del ZIP de ARCA |
 
-La descripción del concepto se toma de `CONCEPTOS_MAP[str(codigo)]` y se *slug-ea*: minúsculas, espacios reemplazados por `_`, eliminando caracteres inválidos para nombres de archivo Windows (`/ \ : * ? " < > |`).
+La descripción del concepto se toma de `CONCEPTOS_MAP[str(codigo)]` y se *slug-ea*: espacios reemplazados por `_`, eliminando caracteres inválidos para nombres de archivo Windows (`/ \ : * ? " < > |`).
 
 **Outputs en la UI:**
 
-- Un único botón de descarga del `.zip` contenedor.
-- Stats chips con: cantidad de comprobantes ARCA, cantidad cruzada, cantidad sin cruce, cantidad de ZIPs generados.
+- Mensaje de éxito con cantidad de ZIPs generados, comprobantes cruzados y comprobantes sin concepto.
 - Tabla expandible con la lista de Conceptos detectados y la cantidad de comprobantes en cada uno.
+- Botón único de descarga del `.zip` contenedor.
 
 > [!IMPORTANT]
 > El CSV de salida es **byte-a-byte equivalente** al CSV de ARCA original en su estructura (mismas columnas, mismo separator, mismo encoding `latin-1`) — sólo cambia el subconjunto de filas. Esto garantiza que el sistema Mendez lo acepte como si viniera directamente del Portal IVA.
@@ -912,6 +1002,7 @@ Excluye el directorio `venv/` y archivos de caché Python del control de version
 | Líneas totales de código | **~7,290** (app.py: ~4,550 + extractor: ~2,740) |
 | Herramientas de la UI | **10** |
 | Hojas Excel posibles | **13** (Movimientos + 6 resúmenes + Asiento + ARCA + overflow ×2 + DE MAS ×2) |
+| Modos del Asiento Contable | **2** (Compras / Ventas, autodetectados desde `meta['tipo_reporte']`) + bloque opcional de Restitución de IVA por NCs |
 | Organismos soportados en Cruce de Deducciones | **4** (ARBA, AGIP, IVA/ARCA, Ganancias/ARCA) |
 | Conceptos contables mapeados | **~200** |
 | Tasas IVA soportadas | **~22** variantes (incluyendo abreviaciones) |
@@ -919,4 +1010,4 @@ Excluye el directorio `venv/` y archivos de caché Python del control de version
 | Jurisdicciones fiscales | **25** provincias + Exterior |
 | Tipos de comprobante | **5** (FC, NC, ND, TF, TK) |
 | Formatos regulatorios generados | **3** (SIFERE percepciones, SIFERE retenciones, ARBA) |
-| Particionadores de archivos | **1** (Importación Compras: CSV ARCA → ZIP por Concepto) |
+| Particionadores de archivos | **2** (Importación Compras: CSV ARCA → ZIP por Concepto · Cruce ARCA: .zip de Faltantes) |
