@@ -412,10 +412,11 @@ TOOL_ARBA = "Agentes de Recaudacion ARBA"
 TOOL_CRUCE_CONCEPTO = "Excel Mendez + TXT Mendez"
 TOOL_CM05 = "Papeles de Trabajo CM05"
 TOOL_CRUCE_DEDUCCIONES = "Cruce de Deducciones"
+TOOL_IMPORTACION = "Importacion Compras (TXT + ZIP ARCA -> ZIPs por Concepto)"
 
 herramienta = st.selectbox(
     "Seleccioná la herramienta:",
-    options=[TOOL_MOVIMIENTOS, TOOL_PORTAL_IVA, TOOL_SIFERE, TOOL_ARBA, TOOL_LIQUIDACIONES, TOOL_DEDUCCIONES, TOOL_CRUCE_CONCEPTO, TOOL_CM05, TOOL_CRUCE_DEDUCCIONES],
+    options=[TOOL_MOVIMIENTOS, TOOL_PORTAL_IVA, TOOL_SIFERE, TOOL_ARBA, TOOL_LIQUIDACIONES, TOOL_DEDUCCIONES, TOOL_CRUCE_CONCEPTO, TOOL_CM05, TOOL_CRUCE_DEDUCCIONES, TOOL_IMPORTACION],
     index=0,
 )
 
@@ -4548,6 +4549,179 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
             letter-spacing: 0.12em;
         ">
             SUBÍ AMBOS ARCHIVOS · TXT MENDEZ + TXT ARBA
+        </div>
+        """, unsafe_allow_html=True)
+
+elif herramienta == TOOL_IMPORTACION:
+    st.markdown('<div class="card"><div class="card-label">01 · Archivo TXT Mendez</div>', unsafe_allow_html=True)
+    uploaded_txt_imp = st.file_uploader(
+        "Subí el TXT/PRN de movimientos del sistema Mendez",
+        type=["txt", "prn"],
+        key="imp_txt"
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="card"><div class="card-label">02 · Archivo ARCA (.zip)</div>', unsafe_allow_html=True)
+    uploaded_arca_imp = st.file_uploader(
+        "Subí el .zip del Portal IVA de ARCA",
+        type=["zip"],
+        key="imp_arca"
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if uploaded_txt_imp is not None and uploaded_arca_imp is not None:
+        st.markdown('<div class="card"><div class="card-label">03 · Procesar</div>', unsafe_allow_html=True)
+        if st.button("⬡  Generar ZIPs por Concepto", use_container_width=True):
+            try:
+                from collections import Counter
+
+                with st.spinner("Parseando TXT Mendez..."):
+                    txt_content = uploaded_txt_imp.getvalue().decode("latin-1")
+                    transacciones_imp, meta_imp = parsear_archivo(content=txt_content)
+
+                if not transacciones_imp:
+                    st.error("No se encontraron transacciones en el TXT Mendez.")
+                    st.stop()
+
+                # Concepto más frecuente por proveedor (CUIT)
+                cuit_counters = {}
+                for t in transacciones_imp:
+                    cuit_norm = re.sub(r'[^0-9]', '', str(t.get('CUIT') or ''))
+                    if not cuit_norm:
+                        continue
+                    concepto = t.get('Concepto')
+                    if concepto in (None, '', 0):
+                        continue
+                    cuit_counters.setdefault(cuit_norm, Counter())[concepto] += 1
+
+                concepto_por_cuit = {
+                    cuit: counter.most_common(1)[0][0]
+                    for cuit, counter in cuit_counters.items()
+                }
+
+                # Leer CSV crudo del ZIP de ARCA
+                with st.spinner("Leyendo ZIP de ARCA..."):
+                    with zipfile.ZipFile(io.BytesIO(uploaded_arca_imp.getvalue())) as zf_in:
+                        archivos_arca = [f for f in zf_in.namelist() if not f.endswith('/')]
+                        if not archivos_arca:
+                            st.error("El .zip de ARCA está vacío.")
+                            st.stop()
+                        target_arca = archivos_arca[0]
+                        raw_arca = zf_in.open(target_arca).read()
+
+                csv_text_arca = raw_arca.decode('latin-1')
+                sep_arca = ';' if csv_text_arca.count(';') > csv_text_arca.count(',') else ','
+                df_arca_raw = pd.read_csv(
+                    io.StringIO(csv_text_arca),
+                    sep=sep_arca,
+                    dtype=str,
+                    keep_default_na=False,
+                    na_values=[],
+                    on_bad_lines='skip',
+                )
+
+                # Localizar columna del CUIT del proveedor
+                cuit_col_arca = None
+                for c in df_arca_raw.columns:
+                    cl = c.strip().lower()
+                    if ('nro' in cl or 'mero' in cl) and 'doc' in cl and ('vendedor' in cl or 'comprador' in cl):
+                        cuit_col_arca = c
+                        break
+                if cuit_col_arca is None:
+                    for c in df_arca_raw.columns:
+                        if c.strip().lower() == 'cuit':
+                            cuit_col_arca = c
+                            break
+                if cuit_col_arca is None:
+                    st.error("No se encontró la columna de CUIT del proveedor en el CSV de ARCA.")
+                    st.stop()
+
+                df_arca_raw['_cuit_norm'] = df_arca_raw[cuit_col_arca].astype(str).apply(
+                    lambda v: re.sub(r'[^0-9]', '', v)
+                )
+                df_arca_raw['_concepto'] = df_arca_raw['_cuit_norm'].map(concepto_por_cuit)
+
+                # Periodo para nombrar el contenedor
+                periodo_meta = (meta_imp.get('periodo') or '').strip()
+                m_per = re.search(r'(\d{2})/(\d{4})', periodo_meta)
+                periodo_tag = f"{m_per.group(2)}{m_per.group(1)}" if m_per else "Periodo"
+                csv_basename = Path(target_arca).name
+
+                def _slug_concepto(desc: str) -> str:
+                    s = re.sub(r'[\\/:*?"<>|]', '', desc).strip()
+                    s = re.sub(r'\s+', '_', s)
+                    return s or 'Concepto'
+
+                # Generar ZIP contenedor con un ZIP por concepto
+                container_buf = io.BytesIO()
+                stats_rows = []
+                with zipfile.ZipFile(container_buf, 'w', zipfile.ZIP_DEFLATED) as zout:
+                    for concepto_val, grupo in df_arca_raw.groupby('_concepto', dropna=False):
+                        grupo_export = grupo.drop(columns=['_concepto', '_cuit_norm'])
+                        csv_io = io.StringIO()
+                        grupo_export.to_csv(csv_io, sep=sep_arca, index=False, lineterminator='\n')
+                        csv_bytes_out = csv_io.getvalue().encode('latin-1', errors='replace')
+
+                        if pd.isna(concepto_val) or concepto_val is None:
+                            zip_name = "SIN_CONCEPTO.zip"
+                            label = "SIN CONCEPTO (revisar manualmente)"
+                        else:
+                            cod_str = str(int(concepto_val)) if isinstance(concepto_val, (int, float)) and not pd.isna(concepto_val) else str(concepto_val)
+                            descripcion = CONCEPTOS_MAP.get(cod_str, f'Concepto {cod_str}')
+                            slug = _slug_concepto(descripcion)
+                            zip_name = f"Concepto_{cod_str}_{slug}.zip"
+                            label = f"{cod_str} · {descripcion}"
+
+                        inner_buf = io.BytesIO()
+                        with zipfile.ZipFile(inner_buf, 'w', zipfile.ZIP_DEFLATED) as zin:
+                            zin.writestr(csv_basename, csv_bytes_out)
+                        zout.writestr(zip_name, inner_buf.getvalue())
+
+                        stats_rows.append({
+                            'Concepto': label,
+                            'Comprobantes': len(grupo_export),
+                            'ZIP': zip_name,
+                        })
+
+                container_name = f"Importacion_Compras_{periodo_tag}.zip"
+
+                total_arca = len(df_arca_raw)
+                total_cruzados = int(df_arca_raw['_concepto'].notna().sum())
+                total_sin = total_arca - total_cruzados
+                total_zips = len(stats_rows)
+
+                st.success(
+                    f"{total_zips} ZIPs generados · "
+                    f"{total_cruzados}/{total_arca} comprobantes cruzados · "
+                    f"{total_sin} sin concepto"
+                )
+
+                stats_df = pd.DataFrame(stats_rows).sort_values(by='Comprobantes', ascending=False)
+                with st.expander("Detalle de ZIPs generados", expanded=True):
+                    st.dataframe(stats_df, use_container_width=True, hide_index=True)
+
+                st.download_button(
+                    label=f"↓  Descargar {container_name}",
+                    data=container_buf.getvalue(),
+                    file_name=container_name,
+                    mime="application/zip",
+                    use_container_width=True,
+                )
+
+            except Exception as e:
+                st.error(f"Error al procesar: {e}")
+        st.markdown('</div>', unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <div style="
+            text-align: center;
+            padding: 2rem 1rem;
+            font-family: 'Space Mono', monospace;
+            font-size: 0.72rem;
+            color: #6b7280;
+            letter-spacing: 0.12em;
+        ">
+            SUBÍ AMBOS ARCHIVOS · TXT MENDEZ + ZIP ARCA
         </div>
         """, unsafe_allow_html=True)
 

@@ -13,7 +13,7 @@
    - [Generadores de archivos regulatorios](#generadores-de-archivos-regulatorios)
 5. [Interfaz Web: `app.py`](#interfaz-web-apppy)
    - [Sistema de diseño CSS](#sistema-de-diseño-css)
-   - [Las 9 herramientas](#las-9-herramientas)
+   - [Las 10 herramientas](#las-10-herramientas)
 6. [Flujo de Datos Completo](#flujo-de-datos-completo)
 7. [Diagramas de Arquitectura](#diagramas-de-arquitectura)
 8. [Archivos Auxiliares](#archivos-auxiliares)
@@ -40,9 +40,8 @@ El sistema contable Mendez genera reportes en archivos `.txt`/`.prn` con formato
 
 ```
 movimientos-a-excel/
-├── app.py                         # Interfaz web Streamlit (2853 líneas)
-├── extractor_movimientos.py       # Motor de parsing y generación Excel (2414 líneas)
-├── _fix_money.py                  # Script one-shot de migración (29 líneas)
+├── app.py                         # Interfaz web Streamlit (~4550 líneas)
+├── extractor_movimientos.py       # Motor de parsing y generación Excel (~2740 líneas)
 ├── requirements.txt               # Dependencias Python
 ├── comando-inicio-entorno.txt     # Notas de activación del venv
 ├── venv/                          # Entorno virtual Python
@@ -62,6 +61,7 @@ graph TD
         B --> H7["7. Cruce Concepto TXT+XLS"]
         B --> H8["8. Papeles CM05"]
         B --> H9["9. Cruce Deducciones TXT"]
+        B --> H10["10. Importación Compras (TXT + ZIP ARCA → ZIPs por Concepto)"]
     end
 
     subgraph "Backend - extractor_movimientos.py"
@@ -77,6 +77,7 @@ graph TD
     H7 --> P
     H8 --> P
     H9 --> P
+    H10 --> P
 ```
 
 ---
@@ -108,7 +109,7 @@ python extractor_movimientos.py archivo.txt
 
 ## Módulo Core: `extractor_movimientos.py`
 
-Este archivo (2414 líneas) es el corazón de toda la aplicación. Contiene el parser de archivos TXT, el generador de Excel y los generadores de archivos regulatorios.
+Este archivo (~2,740 líneas) es el corazón de toda la aplicación. Contiene el parser de archivos TXT, el generador de Excel y los generadores de archivos regulatorios.
 
 ### Diccionario CONCEPTOS_MAP
 
@@ -539,7 +540,7 @@ La aplicación tiene un tema oscuro personalizado ("dark mode premium") con vari
 
 ---
 
-### Las 9 herramientas
+### Las 10 herramientas
 
 #### 1. Listado por fecha TXT Mendez a Excel limpio
 
@@ -676,36 +677,72 @@ Herramienta para preparar los **Papeles de Trabajo del formulario CM05** (Conven
 
 #### 9. Cruce de Deducciones
 
-[app.py:L2992-L4185](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L2992-L4185)
-
-Cruza y concilia los comprobantes de retenciones/percepciones fiscales originados en el **TXT del sistema (Mendez)** contra el **padrón o listado oficial del organismo (ARBA, AGIP o IVA/ARCA)**.
+Cruza y concilia los comprobantes de retenciones/percepciones fiscales originados en el **TXT del sistema (Mendez)** contra el **padrón o listado oficial del organismo (ARBA, AGIP, IVA/ARCA o Ganancias/ARCA)**.
 
 **Organismos soportados:**
 
 | Organismo | Archivo de entrada | Parser |
 |-----------|-------------------|--------|
-| **ARBA** | TXT posicional (71 chars/línea) | `parsear_arba_iibb()` [L3201](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L3201) |
-| **AGIP** | CSV con columnas estándar | `parsear_agip_iibb()` [L3016](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L3016) |
-| **IVA** | XLS de Mis Retenciones ARCA | `parsear_iva_xls()` [L3111](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L3111) |
+| **ARBA** | TXT posicional con auto-detección de formato CR | `parsear_arba_iibb()` |
+| **AGIP** | CSV con columnas estándar | `parsear_agip_iibb()` |
+| **IVA** | XLS de Mis Retenciones/Percepciones ARCA | `parsear_iva_xls()` |
+| **Ganancias** | XLS de Mis Retenciones/Percepciones ARCA | `parsear_iva_xls()` (mismo parser) |
 
 **Proceso de Cruce:**
+
 1. Parsea el TXT Mendez y extrae el mes/año del período.
-2. Parsea el archivo del organismo según el tipo seleccionado.
-3. Filtra las deducciones de Mendez que corresponden al organismo usando keywords (`kw_mendez`) y exclusiones (`excl_mendez`) configuradas por organismo y tipo (Percepciones/Retenciones).
-4. Acumula montos por CUIT desde ambas fuentes → `mendez_por_cuit`, `arba_por_cuit`.
-5. Para ARBA: busca razones sociales faltantes en CuitOnline via `requests`.
-6. Aplica **cancelación multiset por monto**: para cada CUIT con diferencia, empareja los comprobantes que tienen el mismo importe en ambas fuentes y los cancela. Los que no tienen contraparte quedan en `lista_m_dif` (sobrantes en Mendez) o `lista_a_dif` (sobrantes en el organismo).
-7. Genera Excel con hasta **5 hojas**:
+2. Parsea el archivo del organismo según el tipo seleccionado (Percepciones/Retenciones).
+3. Filtra las deducciones de Mendez que corresponden al organismo usando keywords (`kw_mendez`) y exclusiones (`excl_mendez`) configuradas por organismo y tipo.
+4. Construye `mendez_detalle` (lista de comprobantes por CUIT con su monto deducido) y `arba_detalle_list` (lista de registros del organismo).
+5. Acumula montos por CUIT desde ambas fuentes → `mendez_por_cuit`, `arba_por_cuit`.
+6. Para ARBA: busca razones sociales faltantes en CuitOnline via `requests`.
+7. **Consolida registros divididos del organismo** (ver siguiente sección).
+8. **Aplica matching en dos fases por CUIT** (ver siguiente sección).
+9. **Computa Estado por registro** (✓ Ok / ⚠ Falta) en base al resultado del matching.
+10. Genera Excel con hasta **5 hojas**.
+
+**Consolidación de registros divididos del organismo:**
+
+A veces ARCA (y otros organismos) divide una misma percepción en varios registros del mismo `(CUIT, Nro)`. Por ejemplo, un comprobante de Mendez con percepción IVA de $27.819,94 puede aparecer en ARCA como dos filas: $25.186,79 + $2.633,15. Antes del matching:
+
+- Se agrupa por `(CUIT_limpio, Nro)` y se suman los montos en una sola fila.
+- **Excepción Bancos**: si el `Proveedor` contiene "BANCO" (case-insensitive), los registros se mantienen separados — los bancos informan percepciones de forma especial y deben verse como movimientos individuales.
+- Aplica a **todos los organismos** (IVA, Ganancias, ARBA, AGIP).
+
+**Algoritmo de matching en dos fases:**
+
+Sólo se ejecuta para CUITs con `diff != 0` o cantidades distintas en ambas fuentes. Para cada CUIT:
+
+- **Fase 1 (estricta)**: empareja Mendez ↔ Organismo cuando coinciden **Nro AND Monto exacto**. Usa `_nro_match()` que tolera diferencias de formato del Nro: `"11700025262"` (IVA XLS, PV+Nro concatenados) coincide con `"25262"` (Mendez) vía sufijo (mínimo 5 chars para evitar falsos positivos).
+- **Fase 2 (fallback)**: los registros sin par por Nro se intentan emparejar por **Monto exacto**. Sirve para casos donde el Nro nunca matcheó pero el monto sí.
+- **DE MAS**: los registros que no se emparejaron en ninguna fase van a `lista_m_dif` (sobrantes en Mendez) o `lista_a_dif` (sobrantes en el organismo).
+
+> [!IMPORTANT]
+> La Fase 1 exige **monto exacto**. Diferencias de centavos no consolidan — los comprobantes con cent-diff caen a "DE MAS" en ambas hojas para que el usuario los revise manualmente.
+
+> [!NOTE]
+> El matching se ejecuta en **ambas direcciones** (Mendez→Organismo y Organismo→Mendez) usando pools mutables independientes, para garantizar que cada lado reporte sus propios sobrantes correctamente.
+
+**Hojas generadas:**
 
 | Hoja | Contenido | Condición |
 |------|-----------|-----------|
 | **Cruce x CUIT** | Tabla resumen: Total organismo vs Total Mendez, Diferencia, Estado por CUIT | Siempre |
-| **Detalle [Organismo]** | Fila por comprobante del organismo con columna Estado (VLOOKUP a Cruce x CUIT) | Siempre |
-| **Detalle Mendez** | Fila por comprobante de Mendez con columna Estado | Siempre |
+| **Detalle [Organismo]** | Fila por comprobante del organismo con Estado por fila (✓ Ok / ⚠ Falta) | Siempre |
+| **Detalle Mendez** | Fila por comprobante de Mendez con Estado por fila | Siempre |
 | **DE MAS EN MENDEZ** | Mini-tablas por CUIT de comprobantes en Mendez sin contraparte en el organismo | Solo si hay diferencias |
 | **DE MAS EN [ORGANISMO]** | Mini-tablas por CUIT de comprobantes del organismo sin contraparte en Mendez | Solo si hay diferencias |
 
-**Hojas DE MAS — formato de mini-tabla por CUIT** (`_escribir_por_cuit()` [L3912](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L3912)):
+**Estado por registro en hojas Detalle:**
+
+Cada fila individual en `Detalle [Organismo]` y `Detalle Mendez` muestra su propio estado, computado en Python tras el matching:
+- `✓ Ok` → el registro tiene su par en la otra fuente (matcheó por Fase 1 o Fase 2)
+- `⚠ Falta en Mendez` → registro del organismo sin par en Mendez
+- `⚠ Falta en [Organismo]` → registro de Mendez sin par en el organismo
+
+Las **filas subtotal por CUIT** muestran el estado a nivel CUIT (vía `VLOOKUP` a la hoja "Cruce x CUIT").
+
+**Hojas DE MAS — formato de mini-tabla por CUIT** (`_escribir_por_cuit()`):
 
 Cada CUIT con comprobantes sin cancelar recibe su propia mini-tabla:
 ```
@@ -717,7 +754,7 @@ Cada CUIT con comprobantes sin cancelar recibe su propia mini-tabla:
 └─────────────────────────────────────────────────────────┘
 ```
 
-**Parser ARBA — detección automática de formato CR** (`parsear_arba_iibb()` [L3265](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L3265)):
+**Parser ARBA — detección automática de formato CR** (`parsear_arba_iibb()`):
 
 ARBA emite dos variantes del TXT de retenciones. El parser las distingue automáticamente línea a línea:
 
@@ -732,6 +769,10 @@ if len(monto_s) > 20 and monto_s[:20].isdigit() and ',' not in monto_s[:20]:
     monto_s = monto_s[20:]   # saltar nro_constancia
 ```
 
+**Parser IVA/Ganancias — formato del Nro:**
+
+El XLS de "Mis Retenciones/Percepciones" de ARCA almacena el "Número Comprobante" como un único campo numérico que combina PV+Nro (ej: `"0000011700025262"` = PV 117 + Nro 25262, sin separador). El parser preserva este formato; el algoritmo de matching usa `_nro_match()` con sufijo para correlacionar contra el Nro de Mendez (que sólo guarda los últimos dígitos).
+
 **Estados del Cruce x CUIT:**
 
 | Estado | Significado | Color |
@@ -740,6 +781,64 @@ if len(monto_s) > 20 and monto_s[:20].isdigit() and ',' not in monto_s[:20]:
 | `⚠ Diferencia` | Ambos tienen montos pero no coinciden | Amarillo |
 | `⚠ Falta en Mendez` | El organismo tiene el CUIT pero Mendez no | Naranja |
 | `⚠ Falta en {organismo}` | Mendez tiene el CUIT pero el organismo no | Rojo |
+
+---
+
+#### 10. Importación Compras (TXT Mendez + ZIP ARCA → ZIPs por Concepto)
+
+Particiona el CSV del **Portal IVA de ARCA** en múltiples archivos, **uno por cada Concepto contable**, para poder importarlos al sistema interno (Mendez) que sólo acepta una importación por concepto a la vez.
+
+**Problema que resuelve:**
+
+El sistema Mendez/ADDISYC importa comprobantes de compras leyendo el CSV de ARCA, pero exige que cada importación contenga un único Concepto. Hoy esto se hace partiendo el CSV a mano. Esta herramienta automatiza el particionado usando el TXT de Mendez como fuente del Concepto por proveedor.
+
+**Inputs:**
+
+- **TXT de Mendez** (parser existente `parsear_archivo()`) — aporta el histórico de Conceptos por proveedor (CUIT).
+- **ZIP de ARCA** (Portal IVA) — aporta el CSV original que se va a particionar.
+
+**Algoritmo:**
+
+1. Parsea el TXT con `parsear_archivo()` y construye `concepto_por_cuit[CUIT_normalizado] → concepto_num` agrupando todas las transacciones del proveedor con `collections.Counter` y eligiendo el **concepto más frecuente** (`Counter.most_common(1)`). El CUIT se normaliza eliminando todo carácter no numérico.
+2. Lee el CSV de ARCA del ZIP con `pd.read_csv(dtype=str, keep_default_na=False)` para **preservar todos los valores como strings sin reformateo numérico** (mismo encoding `latin-1`, mismo separator auto-detectado).
+3. Localiza la columna de CUIT del proveedor en el CSV de ARCA buscando partial-match en el header (`nro/mero` + `doc` + `vendedor/comprador`, o columna literal `cuit`).
+4. Para cada fila del ARCA, normaliza el CUIT (`re.sub(r'[^0-9]', '', val)`) y consulta `concepto_por_cuit`.
+5. Agrupa filas por concepto resuelto con `df.groupby('_concepto', dropna=False)`. Las filas sin match (CUIT que no figura en el TXT, o proveedor sin Concepto en sus transacciones) caen en el grupo `NaN`.
+6. Para cada grupo: serializa a CSV con `df.to_csv(sep=sep, lineterminator='\n')`, codifica a `latin-1` y lo empaqueta en un `.zip` independiente con nombre `Concepto_{codigo}_{descripcion}.zip`. El grupo `NaN` produce `SIN_CONCEPTO.zip`.
+7. Empaqueta todos los `.zip` por concepto **dentro de un único `.zip` contenedor** (`Importacion_Compras_{AAAAMM}.zip`) y se entrega vía `st.download_button`.
+
+> [!NOTE]
+> **Empate de conceptos:** si un proveedor tiene exactamente la misma cantidad de transacciones con dos conceptos distintos, `Counter.most_common(1)` devuelve el primero según el orden de inserción (es decir, el primer concepto encontrado al leer el TXT de arriba hacia abajo).
+
+**Convención de nombres:**
+
+| Archivo | Nombre |
+|---|---|
+| ZIP por concepto cruzado | `Concepto_{codigo}_{descripcion_slug}.zip` (ej. `Concepto_45_Insumos.zip`) |
+| ZIP comprobantes sin cruce | `SIN_CONCEPTO.zip` |
+| ZIP contenedor descargable | `Importacion_Compras_{AAAAMM}.zip` |
+| CSV interno de cada ZIP | Mismo nombre que el CSV original dentro del ZIP de ARCA |
+
+La descripción del concepto se toma de `CONCEPTOS_MAP[str(codigo)]` y se *slug-ea*: minúsculas, espacios reemplazados por `_`, eliminando caracteres inválidos para nombres de archivo Windows (`/ \ : * ? " < > |`).
+
+**Outputs en la UI:**
+
+- Un único botón de descarga del `.zip` contenedor.
+- Stats chips con: cantidad de comprobantes ARCA, cantidad cruzada, cantidad sin cruce, cantidad de ZIPs generados.
+- Tabla expandible con la lista de Conceptos detectados y la cantidad de comprobantes en cada uno.
+
+> [!IMPORTANT]
+> El CSV de salida es **byte-a-byte equivalente** al CSV de ARCA original en su estructura (mismas columnas, mismo separator, mismo encoding `latin-1`) — sólo cambia el subconjunto de filas. Esto garantiza que el sistema Mendez lo acepte como si viniera directamente del Portal IVA.
+
+> [!NOTE]
+> Los comprobantes que aparecen en ARCA pero no en el TXT (y por lo tanto no tienen Concepto asignado) **no se descartan**: van al `SIN_CONCEPTO.zip` para que el usuario los revise manualmente y decida qué hacer con ellos.
+
+**Reutiliza:**
+
+- `parsear_archivo()` de [extractor_movimientos.py](extractor_movimientos.py) para parsear el TXT.
+- El patrón de descompresión ZIP de la herramienta 1 ([app.py:493-503](app.py#L493-L503)).
+- `CONCEPTOS_MAP` de [extractor_movimientos.py:12-78](extractor_movimientos.py#L12-L78) para nombrar los ZIPs.
+- El patrón de creación de ZIP en memoria con `zipfile.ZipFile(BytesIO, 'w')` de [app.py:2331-2350](app.py#L2331-L2350).
 
 ---
 
@@ -792,12 +891,6 @@ flowchart TB
 
 ## Archivos Auxiliares
 
-### `_fix_money.py`
-
-[_fix_money.py](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/_fix_money.py)
-
-Script de migración **one-shot** (ya ejecutado). Modifica `app.py` para agregar lógica de limpieza de columnas monetarias de ARCA: convertir a numérico, rellenar NaN con 0, eliminar columnas todo-cero. Busca un marcador en el código y lo reemplaza con el nuevo código.
-
 ### `comando-inicio-entorno.txt`
 
 Notas del desarrollador con los comandos para activar el entorno virtual en PowerShell:
@@ -816,12 +909,14 @@ Excluye el directorio `venv/` y archivos de caché Python del control de version
 
 | Métrica | Valor |
 |---------|-------|
-| Líneas totales de código | **~6,600** (app.py: ~4,185 + extractor: 2,414) |
-| Herramientas de la UI | **9** |
+| Líneas totales de código | **~7,290** (app.py: ~4,550 + extractor: ~2,740) |
+| Herramientas de la UI | **10** |
 | Hojas Excel posibles | **13** (Movimientos + 6 resúmenes + Asiento + ARCA + overflow ×2 + DE MAS ×2) |
+| Organismos soportados en Cruce de Deducciones | **4** (ARBA, AGIP, IVA/ARCA, Ganancias/ARCA) |
 | Conceptos contables mapeados | **~200** |
 | Tasas IVA soportadas | **~22** variantes (incluyendo abreviaciones) |
 | Deducciones mapeadas | **~26** percepciones/retenciones |
 | Jurisdicciones fiscales | **25** provincias + Exterior |
 | Tipos de comprobante | **5** (FC, NC, ND, TF, TK) |
 | Formatos regulatorios generados | **3** (SIFERE percepciones, SIFERE retenciones, ARBA) |
+| Particionadores de archivos | **1** (Importación Compras: CSV ARCA → ZIP por Concepto) |
