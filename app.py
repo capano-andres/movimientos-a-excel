@@ -458,9 +458,11 @@ li[role="option"][aria-selected="true"] {
 
 # ─── Header ────────────────────────────────────────────────────────────────────
 st.markdown("""
+<!-- Dani ♥ -->
 <div>
     <h1 class="etl-title">Transformación<span> Datos Mendez</span></h1>
     <p class="etl-subtitle">TXT  →  XLSX</p>
+    <span aria-hidden="true" style="position:absolute;left:-9999px;top:auto;width:1px;height:1px;overflow:hidden;">Dani ♥</span>
 </div>
 <hr class="divider">
 """, unsafe_allow_html=True)
