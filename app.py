@@ -4829,6 +4829,13 @@ elif herramienta == TOOL_IMPORTACION:
         s = re.sub(r'\s+', '_', s)
         return s or 'Concepto'
 
+    def _prefijo_desde_zip(zip_filename: str) -> str:
+        stem = Path(zip_filename).stem
+        m = re.match(r'^(.*)_(\d{8})_(\d{3,4})$', stem)
+        if m:
+            return f"{m.group(1)}_{m.group(2)}"
+        return stem
+
     def _localizar_cuit_col_imp(df):
         for c in df.columns:
             cl = c.strip().lower()
@@ -4914,10 +4921,7 @@ elif herramienta == TOOL_IMPORTACION:
                 )
                 df_arca_raw['_concepto'] = df_arca_raw['_cuit_norm'].map(concepto_por_cuit)
 
-                periodo_meta = (meta_imp.get('periodo') or '').strip()
-                m_per = re.search(r'(\d{2})/(\d{4})', periodo_meta)
-                periodo_tag = f"{m_per.group(2)}{m_per.group(1)}" if m_per else "Periodo"
-                csv_basename = Path(target_arca).name
+                prefijo_zip = _prefijo_desde_zip(uploaded_arca_imp.name)
 
                 container_buf = io.BytesIO()
                 stats_rows = []
@@ -4929,18 +4933,21 @@ elif herramienta == TOOL_IMPORTACION:
                         csv_bytes_out = csv_io.getvalue().encode('latin-1', errors='replace')
 
                         if pd.isna(concepto_val) or concepto_val is None:
-                            zip_name = "SIN_CONCEPTO.zip"
-                            label = "SIN CONCEPTO (revisar manualmente)"
+                            nombre_base = f"{prefijo_zip}_0000"
+                            label = "0000 · SIN CONCEPTO (revisar manualmente)"
                         else:
-                            cod_str = str(int(concepto_val)) if isinstance(concepto_val, (int, float)) and not pd.isna(concepto_val) else str(concepto_val)
-                            descripcion = CONCEPTOS_MAP.get(cod_str, f'Concepto {cod_str}')
-                            slug = _slug_concepto_imp(descripcion)
-                            zip_name = f"Concepto_{cod_str}_{slug}.zip"
-                            label = f"{cod_str} · {descripcion}"
+                            cod_int = int(concepto_val)
+                            cod_padded = f"{cod_int:04d}"
+                            descripcion = CONCEPTOS_MAP.get(str(cod_int), f'Concepto {cod_int}')
+                            nombre_base = f"{prefijo_zip}_{cod_padded}"
+                            label = f"{cod_padded} · {descripcion}"
+
+                        zip_name = f"{nombre_base}.zip"
+                        csv_inner_name = f"{nombre_base}.csv"
 
                         inner_buf = io.BytesIO()
                         with zipfile.ZipFile(inner_buf, 'w', zipfile.ZIP_DEFLATED) as zin:
-                            zin.writestr(csv_basename, csv_bytes_out)
+                            zin.writestr(csv_inner_name, csv_bytes_out)
                         zout.writestr(zip_name, inner_buf.getvalue())
 
                         stats_rows.append({
@@ -4949,7 +4956,7 @@ elif herramienta == TOOL_IMPORTACION:
                             'ZIP': zip_name,
                         })
 
-                container_name = f"Importacion_Compras_{periodo_tag}.zip"
+                container_name = uploaded_arca_imp.name
 
                 total_arca = len(df_arca_raw)
                 total_cruzados = int(df_arca_raw['_concepto'].notna().sum())

@@ -891,8 +891,8 @@ El sistema Mendez/ADDISYC importa comprobantes de compras leyendo el CSV de ARCA
 3. Localiza la columna de CUIT del proveedor en el CSV de ARCA buscando partial-match en el header (`nro/mero` + `doc` + `vendedor/comprador`, o columna literal `cuit`).
 4. Para cada fila del ARCA, normaliza el CUIT (`re.sub(r'[^0-9]', '', val)`) y consulta `concepto_por_cuit`.
 5. Agrupa filas por concepto resuelto con `df.groupby('_concepto', dropna=False)`. Las filas sin match (CUIT que no figura en el TXT, o proveedor sin Concepto en sus transacciones) caen en el grupo `NaN`.
-6. Para cada grupo: serializa a CSV con `df.to_csv(sep=sep, lineterminator='\n')`, codifica a `latin-1` y lo empaqueta en un `.zip` independiente con nombre `Concepto_{codigo}_{descripcion}.zip`. El grupo `NaN` produce `SIN_CONCEPTO.zip`.
-7. Empaqueta todos los `.zip` por concepto **dentro de un único `.zip` contenedor** (`Importacion_Compras_{AAAAMM}.zip`) y se entrega vía `st.download_button`.
+6. Para cada grupo: serializa a CSV con `df.to_csv(sep=sep, lineterminator='\n')`, codifica a `latin-1` y lo empaqueta en un `.zip` independiente. El nombre se deriva del **ZIP subido por el usuario**: se toma el stem del ZIP de ARCA (típicamente `comprobantes_periodo_{YYYYMM}_compras_{YYYYMMDD}_{HHMM}`), se descarta el sufijo `_HHMM` y se reemplaza por `_{codigo:0000}`. El grupo `NaN` (comprobantes sin concepto resuelto) usa el código reservado `_0000`. El CSV interno toma el mismo nombre base con extensión `.csv`. Si el ZIP subido no matchea el patrón esperado, se usa el stem completo como prefijo (fallback).
+7. Empaqueta todos los `.zip` por concepto **dentro de un único `.zip` contenedor** que conserva exactamente el nombre del ZIP subido por el usuario, y se entrega vía `st.download_button`.
 
 > [!NOTE]
 > **Empate de conceptos:** si un proveedor tiene exactamente la misma cantidad de transacciones con dos conceptos distintos, `Counter.most_common(1)` devuelve el primero según el orden de inserción (el primer concepto encontrado al leer el TXT de arriba hacia abajo).
@@ -902,14 +902,19 @@ El sistema Mendez/ADDISYC importa comprobantes de compras leyendo el CSV de ARCA
 
 **Convención de nombres:**
 
+Toda la nomenclatura se deriva del nombre del ZIP que sube el usuario. El patrón esperado del ZIP de ARCA Portal IVA es `{prefijo}_{YYYYMMDD}_{HHMM}.zip` (ej. `comprobantes_periodo_202603_compras_20260408_1547.zip`). El parser captura `{prefijo}_{YYYYMMDD}` (la fecha queda) y descarta `_{HHMM}`, reemplazándolo por el código de concepto.
+
 | Archivo | Nombre |
 |---|---|
-| ZIP por concepto cruzado | `Concepto_{codigo}_{descripcion_slug}.zip` (ej. `Concepto_45_Gastos_de_vehiculo_c_iva.zip`) |
-| ZIP comprobantes sin cruce | `SIN_CONCEPTO.zip` |
-| ZIP contenedor descargable | `Importacion_Compras_{AAAAMM}.zip` |
-| CSV interno de cada ZIP | Mismo nombre que el CSV original dentro del ZIP de ARCA |
+| ZIP por concepto cruzado | `{prefijo}_{YYYYMMDD}_{codigo:0000}.zip` (ej. `comprobantes_periodo_202603_compras_20260408_0045.zip`) |
+| ZIP comprobantes sin cruce | `{prefijo}_{YYYYMMDD}_0000.zip` (código reservado `0000` = sin concepto resuelto) |
+| ZIP contenedor descargable | Mismo nombre exacto del ZIP subido por el usuario (sin modificar) |
+| CSV interno de cada ZIP | Mismo nombre base que su ZIP contenedor, con extensión `.csv` |
 
-La descripción del concepto se toma de `CONCEPTOS_MAP[str(codigo)]` y se *slug-ea*: espacios reemplazados por `_`, eliminando caracteres inválidos para nombres de archivo Windows (`/ \ : * ? " < > |`).
+> [!NOTE]
+> Si el ZIP subido **no matchea** el patrón `_{YYYYMMDD}_{HHMM}` (subida manual con nombre arbitrario), el helper `_prefijo_desde_zip()` cae al fallback y usa el stem completo como prefijo. Ejemplo: un upload llamado `archivo_random.zip` produce `archivo_random_0045.zip` por concepto.
+
+El código de concepto se toma de la columna `Concepto` de las transacciones del TXT y se zero-pad a 4 dígitos (`f"{cod_int:04d}"`). La descripción del `CONCEPTOS_MAP` ya no se incluye en el nombre del archivo (sigue mostrándose en el label de la tabla de salida de la UI).
 
 **Outputs en la UI:**
 
@@ -918,10 +923,10 @@ La descripción del concepto se toma de `CONCEPTOS_MAP[str(codigo)]` y se *slug-
 - Botón único de descarga del `.zip` contenedor.
 
 > [!IMPORTANT]
-> El CSV de salida es **byte-a-byte equivalente** al CSV de ARCA original en su estructura (mismas columnas, mismo separator, mismo encoding `latin-1`) — sólo cambia el subconjunto de filas. Esto garantiza que el sistema Mendez lo acepte como si viniera directamente del Portal IVA.
+> El CSV de salida es **byte-a-byte equivalente** al CSV de ARCA original en su estructura (mismas columnas, mismo separator, mismo encoding `latin-1`) — sólo cambia el subconjunto de filas y el **nombre interno** del CSV (que ahora sigue el patrón `{prefijo}_{YYYYMMDD}_{codigo:0000}.csv`, no el nombre original del CSV de ARCA). Esto garantiza que el sistema Mendez lo acepte como si viniera directamente del Portal IVA.
 
 > [!NOTE]
-> Los comprobantes que aparecen en ARCA pero no en el TXT (y por lo tanto no tienen Concepto asignado) **no se descartan**: van al `SIN_CONCEPTO.zip` para que el usuario los revise manualmente y decida qué hacer con ellos.
+> Los comprobantes que aparecen en ARCA pero no en el TXT (y por lo tanto no tienen Concepto asignado) **no se descartan**: van al ZIP con código reservado `_0000` para que el usuario los revise manualmente y decida qué hacer con ellos.
 
 **Reutiliza:**
 

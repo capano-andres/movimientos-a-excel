@@ -74,7 +74,7 @@ CONCEPTOS_MAP = {
     "193": "pines", "194": "golosinas", "195": "rotary internacional", "196": "distrito rotario 4825",
     "197": "ret- seguridad e higiene a", "198": "gastos de representacion",
     "199": "ativo de caja  (compra + v", "201": "C.M.", "202": "ativo de caja  (compra + v",
-    "203": "Alimentos", "204": "Enfriado",
+    "203": "Alimentos", "204": "Enfriado", "205": "REGALOS EMPRESARIALES"
 }
 
 
