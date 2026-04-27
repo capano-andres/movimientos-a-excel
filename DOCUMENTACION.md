@@ -13,7 +13,7 @@
    - [Generadores de archivos regulatorios](#generadores-de-archivos-regulatorios)
 5. [Interfaz Web: `app.py`](#interfaz-web-apppy)
    - [Sistema de diseño CSS](#sistema-de-diseño-css)
-   - [Las 10 herramientas](#las-10-herramientas)
+   - [Las 11 herramientas](#las-11-herramientas)
 6. [Flujo de Datos Completo](#flujo-de-datos-completo)
 7. [Diagramas de Arquitectura](#diagramas-de-arquitectura)
 8. [Archivos Auxiliares](#archivos-auxiliares)
@@ -62,6 +62,7 @@ graph TD
         B --> H8["8. Papeles CM05"]
         B --> H9["9. Cruce Deducciones TXT"]
         B --> H10["10. Importación Compras (TXT + ZIP ARCA → ZIPs por Concepto)"]
+    B --> H11["11. Armado .zip Importación Ventas / CITI (ZIP ARCA → VENTAS.txt + ALICUOTAS.txt)"]
     end
 
     subgraph "Backend - extractor_movimientos.py"
@@ -69,6 +70,8 @@ graph TD
         P --> S1["generar_sifere_txt()"]
         P --> S2["generar_sifere_retenciones_txt()"]
         P --> S3["generar_percepciones_arba_txt()"]
+        CV["consolidar_ventas_citi()"] --> CL1["generar_citi_ventas_lineas()"]
+        CV --> CL2["generar_citi_alicuotas_lineas()"]
     end
 
     H1 --> P
@@ -78,6 +81,7 @@ graph TD
     H8 --> P
     H9 --> P
     H10 --> P
+    H11 --> CV
 ```
 
 ---
@@ -596,7 +600,7 @@ La aplicación tiene un tema oscuro personalizado ("dark mode premium") con vari
 
 ---
 
-### Las 10 herramientas
+### Las 11 herramientas
 
 #### 1. Listado por fecha TXT Mendez a Excel limpio
 
@@ -937,6 +941,144 @@ El código de concepto se toma de la columna `Concepto` de las transacciones del
 
 ---
 
+#### 11. Armado archivo .zip para importar ventas (CITI Ventas / Importación de Ventas)
+
+Convierte el **ZIP del Portal IVA de ARCA con comprobantes de ventas** en (a) un **Excel resumen** consolidado al estilo Ticket Z y (b) un **`.zip`** con los dos TXT posicionales fijos del **Régimen Informativo de Compras y Ventas (RG 3685 AFIP)** — `VENTAS.txt` (266 chars/línea, REGINFO_CV_VENTAS_CBTE) y `ALICUOTAS.txt` (62 chars/línea, REGINFO_CV_VENTAS_ALICUOTAS) — listos para importar al sistema interno (Mendez) o presentar como CITI Ventas.
+
+**Problema que resuelve:**
+
+Históricamente este flujo se hacía con un Excel macro manual (`Armado CITI Ventas O Importacion de Ventas..xlsm`) en el que el operador pegaba ~9.000 filas/mes en una hoja "Carga de Datos" y un VBA armaba los TXT. Esta herramienta automatiza la conversión partiendo del CSV que ya emite el Portal IVA — que tiene todos los campos requeridos por el régimen — y aplica una **consolidación tipo Ticket Z** que reduce muchísimas filas individuales (típicamente cientos de tickets B por día por punto de venta) a una única línea diaria con `Desde-Hasta`.
+
+**Inputs:**
+
+- **ZIP del Portal IVA** (CSV ventas) — encoding `latin-1`, separator `;`, 33 columnas exactamente como `comprobantes_periodo_{YYYYMM}_ventas_{YYYYMMDD}_{HHMM}.zip`. Headers relevantes: Fecha de Emisión, Tipo de Comprobante, Punto de Venta, Número de Comprobante, Número de Comprobante Hasta, Tipo Doc. Comprador, Nro. Doc. Comprador, Denominación Comprador, Importe Total, Moneda Original, Tipo de Cambio, Importe No Gravado, Importe Exento, Importe de Per. o Pagos a Cta. de Otros Imp. Nac., Importe de Percepciones de Ingresos Brutos, Importe de Impuestos Municipales, Percepción a No Categorizados, Importe de Impuestos Internos, Importe Otros Tributos, Neto Gravado IVA 0% / 2,5% / 5% / 10,5% / 21% / 27%, Importe IVA 2,5% / 5% / 10,5% / 21% / 27%, Total Neto Gravado, Total IVA, Fecha de Vencimiento del Pago.
+
+**Algoritmo:**
+
+1. Lee el CSV del ZIP (`pd.read_csv(..., dtype=str, keep_default_na=False)`) preservando todos los valores como strings.
+2. Normaliza con `normalizar_csv_ventas_arca()`: parsea fechas → `YYYYMMDD`, montos formato argentino (`.` miles, `,` decimal) → float, sanitiza Denominación a ASCII uppercase truncado a 30 chars.
+3. **Consolida** con `consolidar_ventas_citi()` agrupando por `(Fecha, PV, Tipo, DocCod, Doc)`:
+   - `Desde` = `min(Numero)` del grupo
+   - `Hasta` = `max(NumeroHasta)` del grupo (fallback a `Numero` si `NumeroHasta` está vacío)
+   - `Cant. Cbtes` = `Σ(NumeroHasta_fila − Numero_fila + 1)` (no `len(grupo)` — porque el CSV ya puede traer rangos pre-consolidados)
+   - Suma todos los importes (netos por alícuota, IVA por alícuota, percepciones, totales)
+   - `Denominación` = el valor único si todas las filas coinciden, sino `"VARIOS"`
+4. Genera el **Excel resumen** con una fila por consolidado y fila final TOTAL GENERAL con fórmulas `=SUM()`.
+5. Genera **VENTAS.txt** (266 chars/línea) con `generar_citi_ventas_lineas()`.
+6. Genera **ALICUOTAS.txt** (62 chars/línea) con `generar_citi_alicuotas_lineas()` iterando las 6 alícuotas posibles por consolidado y emitiendo línea **sólo** si `Neto > 0` o `IVA > 0`. La `Cant. Alícuotas` del registro CBTE se sincroniza con el conteo real de líneas emitidas (no con el groupby).
+7. Empaqueta `VENTAS.txt` + `ALICUOTAS.txt` en un único `.zip` con encoding **`latin-1`** y line terminator **CRLF (`\r\n`)** — ambos requeridos por AFIP.
+
+**Consolidación tipo Ticket Z:**
+
+La clave de agrupación `(Fecha, PV, Tipo, DocCod, Doc)` produce naturalmente el comportamiento deseado:
+
+- **Tickets B/Z (DocCod=99, Doc=99999999)** — todas las filas del día con el mismo PV+Tipo se acumulan en una línea con su rango Desde-Hasta. Caso típico: tipo 83 (Tique) con 100+ comprobantes por día se reduce a 1 fila.
+- **Facturas A con CUIT identificado (DocCod=80)** — cada CUIT distinto produce su propia fila, porque la clave de agrupación incluye `Doc`. Si el mismo CUIT aparece dos veces en el día con el mismo Tipo, se consolidan; si no, quedan separadas.
+
+> [!NOTE]
+> No se eligen tipos manualmente — la consolidación es uniforme por la clave de agrupación. El comportamiento "Ticket Z" emerge automáticamente del hecho de que los tickets a consumidor final comparten DocCod=99 y Doc=99999999.
+
+**Layout VENTAS.txt — REGINFO_CV_VENTAS_CBTE (266 chars):**
+
+| Pos | Largo | Campo | Tipo | Notas |
+|---|---|---|---|---|
+| 1-8 | 8 | Fecha (Desde) | N | `YYYYMMDD` |
+| 9-11 | 3 | Tipo Cbte | N | zfill 3 (ej. `083` = Tique) |
+| 12-16 | 5 | Punto de Venta | N | zfill 5 |
+| 17-36 | 20 | Nro Cbte (Desde) | N | zfill 20 |
+| 37-56 | 20 | Nro Cbte Hasta | N | zfill 20 |
+| 57-58 | 2 | Cód. Documento Comprador | N | `99` = sin identificar / `80` = CUIT / `96` = DNI |
+| 59-78 | 20 | Nro. Documento Comprador | N | zfill 20 (CUIT sin guiones; CF = `00000000000099999999`) |
+| 79-108 | 30 | Apellido/Denominación | A | ljust 30, ASCII uppercase, sin tildes ni símbolos |
+| 109-123 | 15 | Importe Total | N×100 | zfill 15, sin coma decimal (×100) |
+| 124-138 | 15 | Imp. que no integra Neto Gravado | N×100 | = "Importe No Gravado" |
+| 139-153 | 15 | Percepción a No Categorizados | N×100 | |
+| 154-168 | 15 | Importe Operaciones Exentas | N×100 | |
+| 169-183 | 15 | Percepciones / Pagos a Cta. IVA | N×100 | |
+| 184-198 | 15 | Percepciones IIBB | N×100 | |
+| 199-213 | 15 | Percepciones Imp. Municipales | N×100 | |
+| 214-228 | 15 | Impuestos Internos | N×100 | |
+| 229-231 | 3 | Código de Moneda | A | `PES` |
+| 232-241 | 10 | Tipo de Cambio | N | zfill 10, **× 1.000.000** (ej. `0001000000` = 1.000000) |
+| 242 | 1 | Cantidad de Alícuotas | N | 1-4 (sincronizado con líneas reales de ALICUOTAS.txt) |
+| 243 | 1 | Código de Operación | A | `0` por defecto |
+| 244-258 | 15 | Otros Tributos | N×100 | |
+| 259-266 | 8 | Fecha Vto. Pago | N | `YYYYMMDD` (= Fecha si vacío) |
+
+Suma de anchos: 8+3+5+20+20+2+20+30+15+15+15+15+15+15+15+15+3+10+1+1+15+8 = **266** ✓
+
+**Ejemplo (consolidación de Tiques tipo 83 del día 2026-03-01, PV 7, rango 5929-6027):**
+
+```
+202603010830000700000000000000005929000000000000000060279900000000000099999999CONSUMIDOR FINAL              000000196625032000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000PES00010000002000000000000000000000000
+```
+
+Desglose:
+
+```
+20260301 │ 083 │ 00007 │ 00000000000000005929 │ 00000000000000006027 │ 99 │ 00000000000099999999 │ CONSUMIDOR FINAL              │ 000000196625032 │ ... 7 importes en 0 ... │ PES │ 0001000000 │ 2 │ 0 │ 000000000000000 │ 00000000
+Fecha    │ Tipo│ PV    │ Desde                │ Hasta                │ Doc│ NroDoc                │ Denom (30)                    │ TotImp 1.966.250,32 │ ...           │ Mon │ TC=1.0000 │ 2 alíc│ Op│ Otros           │ Vto Pago
+```
+
+**Layout ALICUOTAS.txt — REGINFO_CV_VENTAS_ALICUOTAS (62 chars):**
+
+| Pos | Largo | Campo | Tipo |
+|---|---|---|---|
+| 1-3 | 3 | Tipo Cbte | N (zfill 3) |
+| 4-8 | 5 | PV | N (zfill 5) |
+| 9-28 | 20 | Nro Cbte (Desde) | N (zfill 20) |
+| 29-43 | 15 | Imp. Neto Gravado | N×100 |
+| 44-47 | 4 | Cód. Alícuota IVA | N |
+| 48-62 | 15 | IVA Liquidado | N×100 |
+
+Suma de anchos: 3+5+20+15+4+15 = **62** ✓
+
+**Códigos de alícuota IVA (AFIP):**
+
+| Código | Alícuota |
+|---|---|
+| `0003` | 0% |
+| `0009` | 2,5% |
+| `0008` | 5% |
+| `0004` | 10,5% |
+| `0005` | 21% |
+| `0006` | 27% |
+
+**Ejemplo de líneas ALICUOTAS** (mismo consolidado del ejemplo VENTAS, dos alícuotas: 21% y 10,5%):
+
+```
+08300007000000000000000059290000001842658770005000000038695834
+08300007000000000000000059290000000779279560004000000008182435
+```
+
+> [!IMPORTANT]
+> **Notas de Crédito (Tipos 03/08/13/53/118)**: el monto va **siempre positivo**. El signo lo determina el `Tipo de Comprobante`. Internamente la herramienta aplica `abs()` antes del `*100` al construir cada campo numérico — confundir el signo del monto rompe la importación.
+
+> [!NOTE]
+> **Encoding y line terminator**: AFIP exige `latin-1` (ISO-8859-1) y CRLF (`\r\n`). La herramienta usa `text.encode('latin-1')` con `'\r\n'.join(lineas)` para garantizar ambos.
+
+> [!WARNING]
+> **DocCod 99 vs 80**: para Consumidor Final usar `DocCod=99` y `Doc=99999999`; para CUIT identificado usar `DocCod=80` y validar que el CUIT tenga 11 dígitos (módulo 11). Mezclar `DocCod=80` con `Doc=99999999` rompe la importación.
+
+> [!WARNING]
+> **Tipo de Cambio**: el formato del campo es entero × 1.000.000 (10 chars zfill). Para pesos forzar `'0001000000'`. Si el CSV trae moneda extranjera con un tipo de cambio decimal (ej. `1234,56`), convertirlo con `int(round(tc * 1_000_000))`.
+
+**Outputs en la UI:**
+
+- Card de **Verificación**: `Σ Importe Total CSV original` vs `Σ Importe Total consolidado` (al centavo); `Σ Total IVA CSV` vs `Σ IVA Liquidado ALICUOTAS.txt /100`; cantidad de líneas emitidas en cada TXT.
+- Botón "↓ Descargar Excel resumen" (`citi_ventas_<periodo>.xlsx`).
+- Botón "↓ Descargar .zip CITI Ventas" (`citi_ventas_<periodo>.zip` con `VENTAS.txt` + `ALICUOTAS.txt` adentro).
+
+**Reutiliza:**
+
+- El patrón de descompresión ZIP + detección de separator de la herramienta 10 ([app.py:493-503](app.py#L493-L503)).
+- `pd.read_csv(..., dtype=str, keep_default_na=False)` con encoding `latin-1` (mismo patrón de la herramienta 2 modo Edición y la 10).
+- El estilo de campos posicionales (`zfill`, `ljust`, slicing `[:N]`) de `generar_sifere_txt()` y `generar_percepciones_arba_txt()` ([extractor_movimientos.py:L1794-L2358](extractor_movimientos.py#L1794-L2358)).
+- El patrón de creación de ZIP en memoria con `zipfile.ZipFile(BytesIO, 'w')` de la herramienta 4 (ARBA) y la 10.
+- El header trifilas + zebra + columnas amarillas (IVA) y verdes (deducciones) de `crear_excel()` ([extractor_movimientos.py:L356-L1791](extractor_movimientos.py#L356-L1791)).
+
+---
+
 ## Flujo de Datos Completo
 
 ```mermaid
@@ -1005,7 +1147,7 @@ Excluye el directorio `venv/` y archivos de caché Python del control de version
 | Métrica | Valor |
 |---------|-------|
 | Líneas totales de código | **~7,290** (app.py: ~4,550 + extractor: ~2,740) |
-| Herramientas de la UI | **10** |
+| Herramientas de la UI | **11** |
 | Hojas Excel posibles | **13** (Movimientos + 6 resúmenes + Asiento + ARCA + overflow ×2 + DE MAS ×2) |
 | Modos del Asiento Contable | **2** (Compras / Ventas, autodetectados desde `meta['tipo_reporte']`) + bloque opcional de Restitución de IVA por NCs |
 | Organismos soportados en Cruce de Deducciones | **4** (ARBA, AGIP, IVA/ARCA, Ganancias/ARCA) |
@@ -1014,5 +1156,6 @@ Excluye el directorio `venv/` y archivos de caché Python del control de version
 | Deducciones mapeadas | **~26** percepciones/retenciones |
 | Jurisdicciones fiscales | **25** provincias + Exterior |
 | Tipos de comprobante | **5** (FC, NC, ND, TF, TK) |
-| Formatos regulatorios generados | **3** (SIFERE percepciones, SIFERE retenciones, ARBA) |
+| Formatos regulatorios generados | **5** (SIFERE percepciones, SIFERE retenciones, ARBA percepciones, ARBA retenciones, CITI Ventas RG 3685 — VENTAS.txt + ALICUOTAS.txt) |
 | Particionadores de archivos | **2** (Importación Compras: CSV ARCA → ZIP por Concepto · Cruce ARCA: .zip de Faltantes) |
+| Consolidadores de archivos | **1** (Armado CITI Ventas: CSV ARCA → consolidación Ticket Z por (Fecha, PV, Tipo, Comprador) → VENTAS.txt + ALICUOTAS.txt) |

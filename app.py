@@ -10,7 +10,7 @@ from pathlib import Path
 from openpyxl.styles import Border, Side, Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 import requests
-from extractor_movimientos import parsear_archivo, crear_excel, generar_sifere_txt, generar_sifere_retenciones_txt, generar_percepciones_arba, generar_arba_desde_excel, generar_retenciones_arba, generar_retenciones_arba_desde_excel, construir_sistema_aux_set, CONCEPTOS_MAP
+from extractor_movimientos import parsear_archivo, crear_excel, generar_sifere_txt, generar_sifere_retenciones_txt, generar_percepciones_arba, generar_arba_desde_excel, generar_retenciones_arba, generar_retenciones_arba_desde_excel, construir_sistema_aux_set, CONCEPTOS_MAP, normalizar_csv_ventas_arca, consolidar_ventas_citi, generar_citi_ventas_lineas, generar_citi_alicuotas_lineas, crear_excel_ventas_citi
 
 @st.cache_data(show_spinner=False)
 def obtener_razon_social_cuitonline(cuit):
@@ -479,10 +479,11 @@ TOOL_CRUCE_CONCEPTO = "Excel Mendez + TXT Mendez"
 TOOL_CM05 = "Papeles de Trabajo CM05"
 TOOL_CRUCE_DEDUCCIONES = "Cruce de Deducciones"
 TOOL_IMPORTACION = "Importacion Compras (TXT + ZIP ARCA -> ZIPs por Concepto)"
+TOOL_VENTAS_CITI = "Armado .zip Importacion Ventas / CITI (ZIP ARCA -> VENTAS.txt + ALICUOTAS.txt)"
 
 herramienta = st.selectbox(
     "Seleccioná la herramienta:",
-    options=[TOOL_MOVIMIENTOS, TOOL_PORTAL_IVA, TOOL_SIFERE, TOOL_ARBA, TOOL_LIQUIDACIONES, TOOL_DEDUCCIONES, TOOL_CRUCE_CONCEPTO, TOOL_CM05, TOOL_CRUCE_DEDUCCIONES, TOOL_IMPORTACION],
+    options=[TOOL_MOVIMIENTOS, TOOL_PORTAL_IVA, TOOL_SIFERE, TOOL_ARBA, TOOL_LIQUIDACIONES, TOOL_DEDUCCIONES, TOOL_CRUCE_CONCEPTO, TOOL_CM05, TOOL_CRUCE_DEDUCCIONES, TOOL_IMPORTACION, TOOL_VENTAS_CITI],
     index=0,
 )
 
@@ -4995,6 +4996,151 @@ elif herramienta == TOOL_IMPORTACION:
             letter-spacing: 0.12em;
         ">
             SUBÍ AMBOS ARCHIVOS · TXT MENDEZ + ZIP ARCA
+        </div>
+        """, unsafe_allow_html=True)
+
+elif herramienta == TOOL_VENTAS_CITI:
+    def _periodo_desde_zip_citi(zip_filename: str) -> str:
+        stem = Path(zip_filename).stem
+        m = re.search(r'(\d{6})', stem)
+        if m:
+            p = m.group(1)
+            return f"{p[:4]}-{p[4:6]}"
+        return 'sin_periodo'
+
+    st.markdown('<div class="card"><div class="card-label">01 · Archivo ARCA (.zip Portal IVA - Ventas)</div>', unsafe_allow_html=True)
+    uploaded_arca_citi = st.file_uploader(
+        "Subí el .zip del Portal IVA de ARCA con los comprobantes de ventas",
+        type=["zip"],
+        key="citi_arca",
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if uploaded_arca_citi is not None:
+        st.markdown('<div class="card"><div class="card-label">02 · Procesar</div>', unsafe_allow_html=True)
+        if st.button("⬡  Generar Excel + ZIP CITI Ventas", use_container_width=True):
+            try:
+                with st.spinner("Leyendo ZIP del Portal IVA..."):
+                    with zipfile.ZipFile(io.BytesIO(uploaded_arca_citi.getvalue())) as zf_in:
+                        archivos = [f for f in zf_in.namelist() if not f.endswith('/') and f.lower().endswith('.csv')]
+                        if not archivos:
+                            st.error("El .zip no contiene ningún CSV.")
+                            st.stop()
+                        csv_name = archivos[0]
+                        raw = zf_in.open(csv_name).read()
+
+                csv_text = raw.decode('latin-1')
+                sep = ';' if csv_text.count(';') > csv_text.count(',') else ','
+                df_arca = pd.read_csv(
+                    io.StringIO(csv_text),
+                    sep=sep,
+                    dtype=str,
+                    keep_default_na=False,
+                    na_values=[],
+                    on_bad_lines='skip',
+                )
+
+                with st.spinner("Normalizando montos y fechas..."):
+                    df_norm = normalizar_csv_ventas_arca(df_arca)
+
+                with st.spinner("Consolidando tipo Ticket Z por (Fecha, PV, Tipo, Comprador)..."):
+                    df_cons = consolidar_ventas_citi(df_norm)
+
+                if df_cons.empty:
+                    st.error("No se encontraron filas para consolidar.")
+                    st.stop()
+
+                ventas_lineas = generar_citi_ventas_lineas(df_cons)
+                alic_lineas = generar_citi_alicuotas_lineas(df_cons)
+
+                periodo = _periodo_desde_zip_citi(uploaded_arca_citi.name)
+
+                # Excel
+                excel_buf = io.BytesIO()
+                crear_excel_ventas_citi(df_cons, periodo, excel_buf, df_original=df_norm)
+                excel_bytes = excel_buf.getvalue()
+
+                # ZIP con los dos TXT
+                zip_buf = io.BytesIO()
+                with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zout:
+                    zout.writestr('VENTAS.txt', '\r\n'.join(ventas_lineas).encode('latin-1'))
+                    zout.writestr('ALICUOTAS.txt', '\r\n'.join(alic_lineas).encode('latin-1'))
+                zip_bytes = zip_buf.getvalue()
+
+                st.session_state['citi_excel_bytes'] = excel_bytes
+                st.session_state['citi_zip_bytes'] = zip_bytes
+                st.session_state['citi_periodo'] = periodo
+
+                # Métricas de verificación
+                sum_total_csv = float(df_norm['importe_total'].sum())
+                sum_total_cons = float(df_cons['importe_total'].sum())
+                sum_iva_csv = float(df_norm['total_iva'].sum())
+                sum_iva_cons = float(df_cons['total_iva'].sum())
+
+                ok_total = abs(sum_total_csv - sum_total_cons) < 0.01
+
+                st.success(
+                    f"{len(df_cons)} consolidados · {int(df_cons['cant_cbtes'].sum())} comprobantes originales · "
+                    f"{len(ventas_lineas)} líneas VENTAS.txt · {len(alic_lineas)} líneas ALICUOTAS.txt"
+                )
+
+                with st.expander("Verificación de totales", expanded=True):
+                    col1, col2 = st.columns(2)
+                    col1.metric("Σ Importe Total CSV", f"{sum_total_csv:,.2f}")
+                    col2.metric(
+                        "Σ Importe Total Consolidado",
+                        f"{sum_total_cons:,.2f}",
+                        delta=f"{sum_total_cons - sum_total_csv:+.2f}",
+                    )
+                    if ok_total:
+                        st.success("✓ Totales coinciden al centavo")
+                    else:
+                        st.warning("⚠ Diferencia detectada — revisar datos del CSV")
+
+                    st.caption(f"Σ Total IVA · CSV: {sum_iva_csv:,.2f}  |  Consolidado: {sum_iva_cons:,.2f}")
+                    st.caption(f"Largo VENTAS.txt: {len(ventas_lineas[0])} chars (debe ser 266)")
+                    st.caption(f"Largo ALICUOTAS.txt: {len(alic_lineas[0])} chars (debe ser 62)")
+
+            except ValueError as ve:
+                st.error(f"Error de validación: {ve}")
+            except Exception as e:
+                st.error(f"Error al procesar: {e}")
+                import traceback
+                st.code(traceback.format_exc())
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        if 'citi_excel_bytes' in st.session_state and 'citi_zip_bytes' in st.session_state:
+            st.markdown('<div class="card"><div class="card-label">03 · Descargar</div>', unsafe_allow_html=True)
+            periodo = st.session_state.get('citi_periodo', 'sin_periodo')
+            col1, col2 = st.columns(2)
+            with col1:
+                st.download_button(
+                    label=f"↓  Excel resumen ({periodo})",
+                    data=st.session_state['citi_excel_bytes'],
+                    file_name=f"citi_ventas_{periodo}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            with col2:
+                st.download_button(
+                    label=f"↓  .zip CITI ({periodo})",
+                    data=st.session_state['citi_zip_bytes'],
+                    file_name=f"citi_ventas_{periodo}.zip",
+                    mime="application/zip",
+                    use_container_width=True,
+                )
+            st.markdown('</div>', unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <div style="
+            text-align: center;
+            padding: 2rem 1rem;
+            font-family: 'Space Mono', monospace;
+            font-size: 0.72rem;
+            color: #6b7280;
+            letter-spacing: 0.12em;
+        ">
+            SUBÍ EL .ZIP DEL PORTAL IVA · VENTAS
         </div>
         """, unsafe_allow_html=True)
 

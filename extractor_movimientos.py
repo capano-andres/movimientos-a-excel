@@ -2866,6 +2866,615 @@ def seleccionar_archivo() -> Path:
     return Path(archivo)
 
 
+# ============================================================================
+# CITI Ventas (RG 3685 AFIP) - Generadores VENTAS.txt + ALICUOTAS.txt
+# ============================================================================
+
+CITI_TIPO_DESC = {
+    1: 'FC A', 2: 'ND A', 3: 'NC A', 4: 'Rec A', 5: 'NVC A',
+    6: 'FC B', 7: 'ND B', 8: 'NC B', 9: 'Rec B', 10: 'NVC B',
+    11: 'FC C', 12: 'ND C', 13: 'NC C', 15: 'Rec C',
+    19: 'FC E', 20: 'ND E', 21: 'NC E', 22: 'FC PES',
+    27: 'LUCI A', 28: 'LUCI B', 29: 'LUCI C',
+    33: 'LPG',
+    34: 'CMP A 1415', 35: 'CMP B 1415', 37: 'ND 1415', 38: 'NC 1415',
+    39: 'OTROS A 1415', 40: 'OTROS B 1415',
+    43: 'NC LUCI B', 44: 'NC LUCI C', 45: 'ND LUCI A', 46: 'ND LUCI B',
+    47: 'ND LUCI C', 48: 'NC LUCI A',
+    51: 'FC M', 52: 'ND M', 53: 'NC M', 54: 'Rec M', 55: 'NVC M',
+    63: 'Liq A', 64: 'Liq B', 68: 'Liq C',
+    81: 'TF A', 82: 'TF B', 83: 'Tique Z',
+    110: 'T NC',
+    111: 'TF C', 113: 'T NV C', 114: 'T NC C', 115: 'T ND C',
+    118: 'T NC B', 119: 'T NC A', 120: 'T ND',
+    195: 'FC T', 196: 'ND T', 197: 'NC T',
+    201: 'FC A MiPyME', 202: 'ND A MiPyME', 203: 'NC A MiPyME',
+    206: 'FC B MiPyME', 207: 'ND B MiPyME', 208: 'NC B MiPyME',
+    211: 'FC C MiPyME', 212: 'ND C MiPyME', 213: 'NC C MiPyME',
+}
+
+
+def _citi_desc_tipo(cod) -> str:
+    try:
+        return CITI_TIPO_DESC.get(int(cod), f'Tipo {int(cod)}')
+    except (TypeError, ValueError):
+        return str(cod)
+
+
+CITI_ALIC_CODIGOS = {
+    'IVA 0%':    '0003',
+    'IVA 2.5%':  '0009',
+    'IVA 5%':    '0008',
+    'IVA 10.5%': '0004',
+    'IVA 21%':   '0005',
+    'IVA 27%':   '0006',
+}
+
+CITI_ALICUOTAS_ORDEN = ['IVA 0%', 'IVA 2.5%', 'IVA 5%', 'IVA 10.5%', 'IVA 21%', 'IVA 27%']
+
+CITI_HEADERS_ESPERADOS = {
+    'fecha': 'Fecha de Emisión',
+    'tipo': 'Tipo de Comprobante',
+    'pv': 'Punto de Venta',
+    'numero': 'Número de Comprobante',
+    'numero_hasta': 'Número de Comprobante Hasta',
+    'doc_cod': 'Tipo Doc. Comprador',
+    'doc_nro': 'Nro. Doc. Comprador',
+    'denom': 'Denominación Comprador',
+    'fecha_vto': 'Fecha de Vencimiento del Pago',
+    'importe_total': 'Importe Total',
+    'moneda': 'Moneda Original',
+    'tc': 'Tipo de Cambio',
+    'no_gravado': 'Importe No Gravado',
+    'exento': 'Importe Exento',
+    'perc_iva': 'Importe de Per. o Pagos a Cta. de Otros Imp. Nac.',
+    'perc_iibb': 'Importe de Percepciones de Ingresos Brutos',
+    'perc_mun': 'Importe de Impuestos Municipales',
+    'perc_no_categ': 'Percepción a No Categorizados',
+    'imp_internos': 'Importe de Impuestos Internos',
+    'otros_trib': 'Importe Otros Tributos',
+    'neto_0': 'Neto Gravado IVA 0%',
+    'neto_2_5': 'Neto Gravado IVA 2,5%',
+    'iva_2_5': 'Importe IVA 2,5%',
+    'neto_5': 'Neto Gravado IVA 5%',
+    'iva_5': 'Importe IVA 5%',
+    'neto_10_5': 'Neto Gravado IVA 10,5%',
+    'iva_10_5': 'Importe IVA 10,5%',
+    'neto_21': 'Neto Gravado IVA 21%',
+    'iva_21': 'Importe IVA 21%',
+    'neto_27': 'Neto Gravado IVA 27%',
+    'iva_27': 'Importe IVA 27%',
+    'total_neto': 'Total Neto Gravado',
+    'total_iva': 'Total IVA',
+}
+
+
+def _citi_parse_money(v) -> float:
+    """Convierte un string de monto formato argentino ('1.234,56' o '1234,56') a float."""
+    if v is None:
+        return 0.0
+    s = str(v).strip()
+    if not s:
+        return 0.0
+    neg = s.startswith('-')
+    s = s.lstrip('-').replace('.', '').replace(',', '.')
+    try:
+        f = float(s)
+        return -f if neg else f
+    except ValueError:
+        return 0.0
+
+
+def _citi_parse_int(v, default: int = 0) -> int:
+    if v is None:
+        return default
+    s = str(v).strip()
+    if not s:
+        return default
+    s = re.sub(r'[^0-9-]', '', s)
+    try:
+        return int(s)
+    except ValueError:
+        return default
+
+
+def _citi_parse_fecha(v) -> str:
+    """Convierte fechas en formatos ISO/AR a 'YYYYMMDD'. Devuelve '' si no parsea."""
+    if v is None:
+        return ''
+    s = str(v).strip()
+    if not s:
+        return ''
+    if re.match(r'^\d{4}-\d{2}-\d{2}', s):
+        return s[:4] + s[5:7] + s[8:10]
+    m = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{4})', s)
+    if m:
+        return f"{m.group(3)}{int(m.group(2)):02d}{int(m.group(1)):02d}"
+    if re.match(r'^\d{8}$', s):
+        return s
+    return ''
+
+
+def _citi_sanitizar_denom(s: str) -> str:
+    """ASCII uppercase, sin tildes ni caracteres no permitidos. Trunca a 30 chars."""
+    import unicodedata
+    if s is None:
+        return ''
+    txt = unicodedata.normalize('NFKD', str(s)).encode('ascii', 'ignore').decode('ascii')
+    txt = txt.upper()
+    txt = re.sub(r'[^A-Z0-9 ./,\-]', ' ', txt)
+    txt = re.sub(r'\s+', ' ', txt).strip()
+    return txt[:30]
+
+
+def normalizar_csv_ventas_arca(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normaliza el DataFrame leído del CSV del Portal IVA ARCA (ventas).
+    Devuelve un nuevo DataFrame con columnas casteadas y una columna interna por header esperado.
+    """
+    faltantes = [h for h in CITI_HEADERS_ESPERADOS.values() if h not in df.columns]
+    if faltantes:
+        raise ValueError(
+            "Faltan columnas en el CSV ARCA. Esperadas pero no encontradas:\n"
+            + "\n".join(f"  - {c}" for c in faltantes)
+        )
+
+    out = pd.DataFrame()
+    out['fecha'] = df[CITI_HEADERS_ESPERADOS['fecha']].apply(_citi_parse_fecha)
+    out['tipo'] = df[CITI_HEADERS_ESPERADOS['tipo']].apply(_citi_parse_int)
+    out['pv'] = df[CITI_HEADERS_ESPERADOS['pv']].apply(_citi_parse_int)
+    out['numero'] = df[CITI_HEADERS_ESPERADOS['numero']].apply(_citi_parse_int)
+    out['numero_hasta'] = df[CITI_HEADERS_ESPERADOS['numero_hasta']].apply(_citi_parse_int)
+    # Si NumeroHasta < Numero o es 0, usar Numero (vectorizado).
+    out['numero_hasta'] = out['numero_hasta'].where(
+        out['numero_hasta'] >= out['numero'], out['numero']
+    )
+    out['doc_cod'] = df[CITI_HEADERS_ESPERADOS['doc_cod']].apply(_citi_parse_int)
+    out['doc_nro'] = df[CITI_HEADERS_ESPERADOS['doc_nro']].astype(str).apply(
+        lambda s: re.sub(r'[^0-9]', '', s) or '0'
+    )
+    out['denom'] = df[CITI_HEADERS_ESPERADOS['denom']].apply(_citi_sanitizar_denom)
+    out['fecha_vto'] = df[CITI_HEADERS_ESPERADOS['fecha_vto']].apply(_citi_parse_fecha)
+    out['moneda'] = df[CITI_HEADERS_ESPERADOS['moneda']].astype(str).str.strip().str.upper().replace('', 'PES')
+    out['tc'] = df[CITI_HEADERS_ESPERADOS['tc']].apply(_citi_parse_money)
+
+    monto_keys = [
+        'importe_total', 'no_gravado', 'exento', 'perc_iva', 'perc_iibb',
+        'perc_mun', 'perc_no_categ', 'imp_internos', 'otros_trib',
+        'neto_0', 'neto_2_5', 'iva_2_5', 'neto_5', 'iva_5',
+        'neto_10_5', 'iva_10_5', 'neto_21', 'iva_21', 'neto_27', 'iva_27',
+        'total_neto', 'total_iva',
+    ]
+    for k in monto_keys:
+        out[k] = df[CITI_HEADERS_ESPERADOS[k]].apply(_citi_parse_money)
+
+    return out
+
+
+def consolidar_ventas_citi(df_norm: pd.DataFrame) -> pd.DataFrame:
+    """
+    Agrupa por (Fecha, PV, Tipo, DocCod, Doc) — consolidación tipo Ticket Z.
+    Tickets a CF (DocCod=99, Doc=99999999) se acumulan en una línea por día/PV/tipo.
+    Facturas con CUITs distintos quedan separadas.
+    """
+    if df_norm.empty:
+        return df_norm.copy()
+
+    # Cantidad de comprobantes contemplada en cada fila original (rangos pre-consolidados):
+    df = df_norm.copy()
+    df['_cant_fila'] = (df['numero_hasta'] - df['numero'] + 1).clip(lower=1)
+
+    grupos = df.groupby(['fecha', 'pv', 'tipo', 'doc_cod', 'doc_nro'], dropna=False, sort=True)
+
+    sum_cols = [
+        'importe_total', 'no_gravado', 'exento', 'perc_iva', 'perc_iibb',
+        'perc_mun', 'perc_no_categ', 'imp_internos', 'otros_trib',
+        'neto_0', 'neto_2_5', 'iva_2_5', 'neto_5', 'iva_5',
+        'neto_10_5', 'iva_10_5', 'neto_21', 'iva_21', 'neto_27', 'iva_27',
+        'total_neto', 'total_iva',
+    ]
+
+    rows_out = []
+    for (fecha, pv, tipo, doc_cod, doc_nro), g in grupos:
+        row = {
+            'fecha': fecha,
+            'pv': int(pv),
+            'tipo': int(tipo),
+            'doc_cod': int(doc_cod),
+            'doc_nro': doc_nro,
+            'desde': int(g['numero'].min()),
+            'hasta': int(g['numero_hasta'].max()),
+            'cant_cbtes': int(g['_cant_fila'].sum()),
+        }
+        denoms_unicas = g['denom'].dropna().unique()
+        denoms_unicas = [d for d in denoms_unicas if d]
+        if len(denoms_unicas) == 1:
+            row['denom'] = denoms_unicas[0]
+        elif len(denoms_unicas) == 0:
+            row['denom'] = ''
+        else:
+            row['denom'] = 'VARIOS'
+        # Fecha vto: la mínima no vacía, fallback a fecha
+        vtos = [v for v in g['fecha_vto'] if v]
+        row['fecha_vto'] = min(vtos) if vtos else fecha
+        # Moneda y TC: tomar la primera (típicamente PES uniforme)
+        row['moneda'] = g['moneda'].iloc[0]
+        tc = g['tc'].iloc[0]
+        row['tc'] = tc if tc and tc > 0 else 1.0
+        for c in sum_cols:
+            row[c] = float(g[c].sum())
+        rows_out.append(row)
+
+    df_out = pd.DataFrame(rows_out)
+    if df_out.empty:
+        return df_out
+    return df_out.sort_values(['fecha', 'pv', 'tipo', 'desde']).reset_index(drop=True)
+
+
+def _alicuotas_de_consolidado(row) -> list[tuple[str, float, float]]:
+    """Devuelve la lista de (codigo_alicuota_4, neto, iva) con neto>0 o iva>0 para la fila consolidada."""
+    candidatos = [
+        ('IVA 0%',    row.get('neto_0', 0.0),    0.0),
+        ('IVA 2.5%',  row.get('neto_2_5', 0.0),  row.get('iva_2_5', 0.0)),
+        ('IVA 5%',    row.get('neto_5', 0.0),    row.get('iva_5', 0.0)),
+        ('IVA 10.5%', row.get('neto_10_5', 0.0), row.get('iva_10_5', 0.0)),
+        ('IVA 21%',   row.get('neto_21', 0.0),   row.get('iva_21', 0.0)),
+        ('IVA 27%',   row.get('neto_27', 0.0),   row.get('iva_27', 0.0)),
+    ]
+    res = []
+    for nombre, neto, iva in candidatos:
+        if abs(neto) > 0.001 or abs(iva) > 0.001:
+            res.append((CITI_ALIC_CODIGOS[nombre], float(neto), float(iva)))
+
+    if not res:
+        # Fallback comprobantes 100% exentos: emitir 1 línea con neto=Exento, código 0% (0003)
+        exento = float(row.get('exento', 0.0))
+        if abs(exento) > 0.001:
+            res.append((CITI_ALIC_CODIGOS['IVA 0%'], exento, 0.0))
+        else:
+            # Sin nada — emitir 1 línea con neto = importe_total, IVA 0
+            res.append((CITI_ALIC_CODIGOS['IVA 0%'], float(row.get('importe_total', 0.0)), 0.0))
+    return res
+
+
+def _citi_n(val: float, length: int) -> str:
+    """Codifica monto: abs(val)*100, redondeado, zfill al ancho."""
+    cents = int(round(abs(float(val)) * 100))
+    return str(cents).zfill(length)[-length:]
+
+
+def _citi_z(val, length: int) -> str:
+    """Entero zfill."""
+    try:
+        n = int(val)
+    except (TypeError, ValueError):
+        n = 0
+    return str(abs(n)).zfill(length)[-length:]
+
+
+def _citi_a(val, length: int) -> str:
+    """Texto ljust con espacios."""
+    s = '' if val is None else str(val)
+    return s.ljust(length)[:length]
+
+
+def generar_citi_ventas_lineas(df_consolidado: pd.DataFrame) -> list[str]:
+    """Genera las líneas de VENTAS.txt (266 chars/línea) según RG 3685 REGINFO_CV_VENTAS_CBTE."""
+    lineas = []
+    for _, r in df_consolidado.iterrows():
+        cant_alic = len(_alicuotas_de_consolidado(r))
+        moneda = (r.get('moneda') or 'PES').strip().upper()[:3].ljust(3)
+        if moneda.strip() == 'PES':
+            tc_str = '0001000000'
+        else:
+            tc_val = float(r.get('tc') or 1.0)
+            tc_str = str(int(round(tc_val * 1_000_000))).zfill(10)[-10:]
+
+        linea = (
+            _citi_a(r['fecha'], 8)
+            + _citi_z(r['tipo'], 3)
+            + _citi_z(r['pv'], 5)
+            + _citi_z(r['desde'], 20)
+            + _citi_z(r['hasta'], 20)
+            + _citi_z(r['doc_cod'], 2)
+            + _citi_a(str(r['doc_nro']).rjust(20, '0')[-20:], 20)
+            + _citi_a(r.get('denom', ''), 30)
+            + _citi_n(r['importe_total'], 15)
+            + _citi_n(r['no_gravado'], 15)
+            + _citi_n(r['perc_no_categ'], 15)
+            + _citi_n(r['exento'], 15)
+            + _citi_n(r['perc_iva'], 15)
+            + _citi_n(r['perc_iibb'], 15)
+            + _citi_n(r['perc_mun'], 15)
+            + _citi_n(r['imp_internos'], 15)
+            + moneda
+            + tc_str
+            + str(min(max(cant_alic, 0), 9))
+            + '0'
+            + _citi_n(r['otros_trib'], 15)
+            + _citi_a(r.get('fecha_vto') or r['fecha'], 8)
+        )
+        if len(linea) != 266:
+            raise ValueError(f"VENTAS.txt: línea con largo {len(linea)} (debe ser 266) para fila {dict(r)}")
+        lineas.append(linea)
+    return lineas
+
+
+def generar_citi_alicuotas_lineas(df_consolidado: pd.DataFrame) -> list[str]:
+    """Genera las líneas de ALICUOTAS.txt (62 chars/línea) según RG 3685 REGINFO_CV_VENTAS_ALICUOTAS."""
+    lineas = []
+    for _, r in df_consolidado.iterrows():
+        for cod_alic, neto, iva in _alicuotas_de_consolidado(r):
+            linea = (
+                _citi_z(r['tipo'], 3)
+                + _citi_z(r['pv'], 5)
+                + _citi_z(r['desde'], 20)
+                + _citi_n(neto, 15)
+                + cod_alic
+                + _citi_n(iva, 15)
+            )
+            if len(linea) != 62:
+                raise ValueError(f"ALICUOTAS.txt: línea con largo {len(linea)} (debe ser 62)")
+            lineas.append(linea)
+    return lineas
+
+
+_CITI_COLUMNAS = [
+    ('Fecha', 'fecha', 'fija'),
+    ('PV', 'pv', 'fija'),
+    ('Tipo', 'tipo', 'fija'),
+    ('Desde', 'desde', 'fija'),
+    ('Hasta', 'hasta', 'fija'),
+    ('Cant.', 'cant_cbtes', 'fija'),
+    ('DocCod', 'doc_cod', 'fija'),
+    ('Doc', 'doc_nro', 'fija'),
+    ('Denominación', 'denom', 'fija'),
+    ('Importe Total', 'importe_total', 'monto'),
+    ('Neto 0%', 'neto_0', 'iva'),
+    ('Neto 2,5%', 'neto_2_5', 'iva'),
+    ('IVA 2,5%', 'iva_2_5', 'iva'),
+    ('Neto 5%', 'neto_5', 'iva'),
+    ('IVA 5%', 'iva_5', 'iva'),
+    ('Neto 10,5%', 'neto_10_5', 'iva'),
+    ('IVA 10,5%', 'iva_10_5', 'iva'),
+    ('Neto 21%', 'neto_21', 'iva'),
+    ('IVA 21%', 'iva_21', 'iva'),
+    ('Neto 27%', 'neto_27', 'iva'),
+    ('IVA 27%', 'iva_27', 'iva'),
+    ('Perc IIBB', 'perc_iibb', 'deduc'),
+    ('Perc Mun', 'perc_mun', 'deduc'),
+    ('Perc IVA', 'perc_iva', 'deduc'),
+    ('Perc no Categ', 'perc_no_categ', 'deduc'),
+    ('Imp Internos', 'imp_internos', 'deduc'),
+    ('Otros Trib', 'otros_trib', 'deduc'),
+    ('No Gravado', 'no_gravado', 'monto'),
+    ('Exento', 'exento', 'monto'),
+    ('Total IVA', 'total_iva', 'monto'),
+]
+
+
+_CITI_LITE_THRESHOLD = 500
+
+
+def _escribir_hoja_citi(ws, df_subset: pd.DataFrame, titulo: str, subtitulo: str) -> None:
+    """Escribe una hoja con el formato CITI (header trifilas + datos + TOTAL GENERAL).
+    Las columnas numéricas todo-cero en este subset se eliminan.
+    Para hojas con > _CITI_LITE_THRESHOLD filas usa modo lite (sin zebra/borders en cuerpo)."""
+    from openpyxl.utils import get_column_letter
+
+    azul = PatternFill('solid', fgColor='1F4E78')
+    azul_claro = PatternFill('solid', fgColor='F2F7FB')
+    amarillo = PatternFill('solid', fgColor='FFF2CC')
+    verde = PatternFill('solid', fgColor='E2EFDA')
+    total_fill = PatternFill('solid', fgColor='D9E1F2')
+    iva_hdr = PatternFill('solid', fgColor='C09700')
+    deduc_hdr = PatternFill('solid', fgColor='548235')
+    bold_white = Font(bold=True, color='FFFFFF', name='Calibri')
+    bold = Font(bold=True, name='Calibri')
+    border = Border(
+        left=Side(style='thin', color='B4C6E7'),
+        right=Side(style='thin', color='B4C6E7'),
+        top=Side(style='thin', color='B4C6E7'),
+        bottom=Side(style='thin', color='B4C6E7'),
+    )
+
+    columnas = []
+    for titulo_col, key, kind in _CITI_COLUMNAS:
+        if kind in ('monto', 'iva', 'deduc') and not df_subset.empty:
+            col_vals = df_subset.get(key)
+            if col_vals is not None and (col_vals.abs().sum() < 0.005):
+                continue
+        columnas.append((titulo_col, key, kind))
+
+    n_cols = len(columnas)
+    n_rows = len(df_subset)
+    lite = n_rows > _CITI_LITE_THRESHOLD
+
+    ws.cell(1, 1, titulo).font = Font(bold=True, color='FFFFFF', size=14, name='Calibri')
+    ws.cell(1, 1).fill = azul
+    ws.cell(1, 1).alignment = Alignment(horizontal='center', vertical='center')
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=n_cols)
+    ws.row_dimensions[1].height = 26
+
+    ws.cell(2, 1, subtitulo).font = Font(bold=True, color='1F4E78', name='Calibri')
+    ws.cell(2, 1).alignment = Alignment(horizontal='center', vertical='center')
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=n_cols)
+    ws.row_dimensions[2].height = 18
+
+    HDR_ROW = 4
+    for i, (titulo_col, _, kind) in enumerate(columnas, start=1):
+        c = ws.cell(HDR_ROW, i, titulo_col)
+        c.font = bold_white
+        if kind == 'iva':
+            c.fill = iva_hdr
+        elif kind == 'deduc':
+            c.fill = deduc_hdr
+        else:
+            c.fill = azul
+        c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        c.border = border
+    ws.row_dimensions[HDR_ROW].height = 30
+
+    if lite and n_rows > 0:
+        # Modo lite: vectorizar transformaciones, ws.append() en bulk, estilos por columna.
+        df_render = df_subset.copy()
+        if 'fecha' in df_render.columns:
+            df_render['fecha'] = df_render['fecha'].apply(
+                lambda v: f"{v[:4]}-{v[4:6]}-{v[6:8]}" if isinstance(v, str) and len(v) == 8 else v
+            )
+        if 'tipo' in df_render.columns:
+            df_render['tipo'] = df_render['tipo'].map(
+                lambda v: _citi_desc_tipo(v) if v is not None else ''
+            )
+        # Reemplazar NaN por 0 en columnas numéricas
+        num_keys = [k for _, k, kind in columnas if kind in ('monto', 'iva', 'deduc')]
+        for k in num_keys:
+            if k in df_render.columns:
+                df_render[k] = df_render[k].fillna(0)
+
+        keys_orden = [k for _, k, _ in columnas]
+        rows_data = df_render[keys_orden].values.tolist()
+        for vals in rows_data:
+            ws.append(vals)
+
+        # Aplicar fill IVA/deduc + number_format por columna en una pasada.
+        for cidx, (_, key, kind) in enumerate(columnas, start=1):
+            if kind not in ('monto', 'iva', 'deduc'):
+                continue
+            fill_for_col = amarillo if kind == 'iva' else (verde if kind == 'deduc' else None)
+            for r in range(HDR_ROW + 1, HDR_ROW + 1 + n_rows):
+                cell = ws.cell(r, cidx)
+                cell.number_format = '#,##0.00'
+                if fill_for_col is not None:
+                    cell.fill = fill_for_col
+    else:
+        # Modo full: cell-by-cell con borders + zebra + fills por celda (hojas chicas).
+        for ridx, (_, row) in enumerate(df_subset.iterrows()):
+            excel_row = HDR_ROW + 1 + ridx
+            zebra = (ridx % 2 == 1)
+            for cidx, (_, key, kind) in enumerate(columnas, start=1):
+                v = row.get(key)
+                if key == 'fecha' and isinstance(v, str) and len(v) == 8:
+                    v = f"{v[:4]}-{v[4:6]}-{v[6:8]}"
+                if key == 'tipo':
+                    v = _citi_desc_tipo(v)
+                cell = ws.cell(excel_row, cidx, v if not (isinstance(v, float) and pd.isna(v)) else 0)
+                if kind in ('monto', 'iva', 'deduc'):
+                    cell.number_format = '#,##0.00'
+                cell.border = border
+                if zebra:
+                    cell.fill = azul_claro
+                if kind == 'iva':
+                    cell.fill = amarillo
+                elif kind == 'deduc':
+                    cell.fill = verde
+
+    if n_rows > 0:
+        total_row = HDR_ROW + 1 + n_rows
+        ws.cell(total_row, 1, 'TOTAL').font = bold
+        ws.cell(total_row, 1).fill = total_fill
+        ws.cell(total_row, 1).border = border
+        for cidx, (_, key, kind) in enumerate(columnas, start=1):
+            cell = ws.cell(total_row, cidx)
+            cell.border = border
+            cell.fill = total_fill
+            cell.font = bold
+            if kind in ('monto', 'iva', 'deduc'):
+                col_letter = get_column_letter(cidx)
+                cell.value = f"=SUM({col_letter}{HDR_ROW + 1}:{col_letter}{HDR_ROW + n_rows})"
+                cell.number_format = '#,##0.00'
+
+    anchos = {
+        'fecha': 12, 'pv': 6, 'tipo': 14, 'desde': 11, 'hasta': 11, 'cant_cbtes': 7,
+        'doc_cod': 7, 'doc_nro': 14, 'denom': 28,
+    }
+    for cidx, (_, key, _) in enumerate(columnas, start=1):
+        ws.column_dimensions[get_column_letter(cidx)].width = anchos.get(key, 14)
+
+    ws.freeze_panes = ws.cell(HDR_ROW + 1, 1)
+
+
+def crear_excel_ventas_citi(
+    df_consolidado: pd.DataFrame,
+    periodo: str,
+    output,
+    df_original: pd.DataFrame | None = None,
+) -> None:
+    """Genera Excel CITI Ventas con hojas: TODOS (consolidado), Original (sin agrupar) y una hoja por (PV, Tipo)."""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    if df_consolidado.empty:
+        ws = wb.create_sheet('Vacío')
+        _escribir_hoja_citi(ws, df_consolidado, 'ARMADO CITI VENTAS', f'Periodo: {periodo}  |  Sin datos')
+    else:
+        # Hoja principal con TODOS los movimientos consolidados.
+        n_total = len(df_consolidado)
+        cbtes_total = int(df_consolidado['cant_cbtes'].sum())
+        ws_todos = wb.create_sheet('TODOS')
+        _escribir_hoja_citi(
+            ws_todos, df_consolidado.reset_index(drop=True),
+            'CITI VENTAS · TODOS LOS MOVIMIENTOS',
+            f'Periodo: {periodo}  |  Consolidados: {n_total}  |  Comprobantes originales: {cbtes_total}',
+        )
+
+        # Hoja Original: una fila por comprobante del CSV (sin agrupar).
+        if df_original is not None and not df_original.empty:
+            df_orig_view = df_original.copy()
+            df_orig_view['desde'] = df_orig_view['numero']
+            df_orig_view['hasta'] = df_orig_view['numero_hasta']
+            df_orig_view['cant_cbtes'] = (
+                df_orig_view['numero_hasta'] - df_orig_view['numero'] + 1
+            ).clip(lower=1)
+            df_orig_view = df_orig_view.sort_values(
+                ['fecha', 'pv', 'tipo', 'desde']
+            ).reset_index(drop=True)
+            ws_orig = wb.create_sheet('Original')
+            _escribir_hoja_citi(
+                ws_orig, df_orig_view,
+                'CITI VENTAS · ORIGINAL (SIN AGRUPAR)',
+                f'Periodo: {periodo}  |  Filas CSV: {len(df_orig_view)}  |  Comprobantes originales: {int(df_orig_view["cant_cbtes"].sum())}',
+            )
+
+        # Una hoja por (PV, Tipo). Orden: PV asc, luego Tipo asc.
+        combos = sorted(
+            df_consolidado[['pv', 'tipo']].drop_duplicates().itertuples(index=False, name=None)
+        )
+        used_names = set()
+        for pv, tipo in combos:
+            df_grp = df_consolidado[
+                (df_consolidado['pv'] == pv) & (df_consolidado['tipo'] == tipo)
+            ].reset_index(drop=True)
+            n_rows = len(df_grp)
+            total_cbtes = int(df_grp['cant_cbtes'].sum())
+            tipo_desc = _citi_desc_tipo(tipo)
+            sheet_name = f'PV {int(pv):05d} - {tipo_desc}'[:31]
+            base_name = sheet_name
+            i = 2
+            while sheet_name in used_names:
+                suf = f' ({i})'
+                sheet_name = base_name[:31 - len(suf)] + suf
+                i += 1
+            used_names.add(sheet_name)
+            ws = wb.create_sheet(sheet_name)
+            subtitulo = (
+                f'Periodo: {periodo}  |  PV {int(pv):05d}  |  Tipo: {tipo_desc} ({int(tipo)})  |  '
+                f'Consolidados: {n_rows}  |  Comprobantes originales: {total_cbtes}'
+            )
+            _escribir_hoja_citi(
+                ws, df_grp,
+                f'CITI VENTAS · PV {int(pv):05d} · {tipo_desc}',
+                subtitulo,
+            )
+
+    if hasattr(output, 'write'):
+        wb.save(output)
+    else:
+        wb.save(str(output))
+
+
 def main():
     # Forzar UTF-8 en la consola de Windows (solo cuando se corre como script)
     import sys, io
