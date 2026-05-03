@@ -230,8 +230,7 @@ h1, h2, h3, h4, p, span, div, label {
     display: inline-block;
     vertical-align: middle;
 }
-/* Botón "Browse files" → "Buscar archivo" */
-[data-testid="stFileUploader"] button,
+/* Botón "Browse files" → "Buscar archivo" (SOLO el del dropzone, NO el de eliminar archivo) */
 [data-testid="stFileUploaderDropzone"] button {
     font-size: 0 !important;
     color: transparent !important;
@@ -242,12 +241,10 @@ h1, h2, h3, h4, p, span, div, label {
     padding-right: 1rem !important;
     white-space: nowrap !important;
 }
-[data-testid="stFileUploader"] button *,
 [data-testid="stFileUploaderDropzone"] button * {
     font-size: 0 !important;
     color: transparent !important;
 }
-[data-testid="stFileUploader"] button::after,
 [data-testid="stFileUploaderDropzone"] button::after {
     content: "Buscar archivo";
     font-size: 0.75rem !important;
@@ -2792,6 +2789,7 @@ elif herramienta == TOOL_CRUCE_CONCEPTO:
                         matched = 0
                         last_concepto = ''
                         last_jur = ''
+                        not_found_rows: list[dict] = []
                         for idx, row in df_xls.iterrows():
                             if mask_header.iloc[idx]:
                                 # Es fila cabecera → buscar concepto y jurisdicción
@@ -2805,6 +2803,14 @@ elif herramienta == TOOL_CRUCE_CONCEPTO:
                                 else:
                                     last_concepto = ''
                                     last_jur = ''
+                                    # Capturar los valores originales antes de las transformaciones posteriores
+                                    not_found_rows.append({
+                                        'Fecha': str(row.get('Fecha', '')).strip(),
+                                        'Tipo': str(row.get('TC', '')).strip(),
+                                        'Numero': str(row.get('Numero', '')).strip(),
+                                        'Nombre': str(row.get('Nombre', '')).strip(),
+                                        'CUIT': str(row.get('C.U.I.T.', '')).strip(),
+                                    })
                                 conceptos_cod.append(last_concepto)
                                 jurisdicciones.append(last_jur)
                             else:
@@ -2900,6 +2906,9 @@ elif herramienta == TOOL_CRUCE_CONCEPTO:
 
                     if not_found > 0:
                         st.warning(f"**{not_found}** comprobantes del Excel no fueron encontrados en el TXT")
+                        with st.expander(f"Ver detalle de los {not_found} comprobantes no encontrados"):
+                            df_nf = pd.DataFrame(not_found_rows)
+                            st.dataframe(df_nf, use_container_width=True, hide_index=True)
 
                     if formato_cruce == FMT_CONSOLIDADO:
                         # ── Formato Consolidado: usar crear_excel del TXT ──
@@ -3143,6 +3152,7 @@ elif herramienta == TOOL_CM05:
                         last_jur_cm05 = ''
                         conceptos_cod_cm05 = []
                         jurisdicciones_cm05 = []
+                        not_found_rows_cm05: list[dict] = []
 
                         for idx, row in df_xls_cm05.iterrows():
                             if mask_header_cm05.iloc[idx]:
@@ -3155,6 +3165,13 @@ elif herramienta == TOOL_CM05:
                                 else:
                                     last_concepto_cm05 = ''
                                     last_jur_cm05 = ''
+                                    not_found_rows_cm05.append({
+                                        'Fecha': str(row.get('Fecha', '')).strip(),
+                                        'Tipo': str(row.get('TC', '')).strip(),
+                                        'Numero': str(row.get('Numero', '')).strip(),
+                                        'Nombre': str(row.get('Nombre', '')).strip(),
+                                        'CUIT': str(row.get('C.U.I.T.', '')).strip(),
+                                    })
                                 conceptos_cod_cm05.append(last_concepto_cm05)
                                 jurisdicciones_cm05.append(last_jur_cm05)
                             else:
@@ -3395,6 +3412,9 @@ elif herramienta == TOOL_CM05:
 
                     if not_found_cm05 > 0:
                         st.warning(f"**{not_found_cm05}** comprobantes del Excel no fueron encontrados en el TXT")
+                        with st.expander(f"Ver detalle de los {not_found_cm05} comprobantes no encontrados"):
+                            df_nf_cm05 = pd.DataFrame(not_found_rows_cm05)
+                            st.dataframe(df_nf_cm05, use_container_width=True, hide_index=True)
 
                     st.info(
                         f"**{meta_cm05.get('tipo_reporte', 'N/A')}** · "

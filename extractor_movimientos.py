@@ -89,9 +89,9 @@ RE_MAIN = re.compile(
     r'^\s*(\d{1,2})\s+'                            # Dia
     r'(FC|NC|ND|TF|TK|Li)\s+'                       # Tipo comprobante
     r'(\d{5}-\d{1,12}[A-Z ]?)\s*'                   # Numero (más flexible para exportación)
-    r'(.+?)\s+'                                     # Proveedor (Flexible hasta Cond IVA)
-    r'(Ins\.|Mono|Monot|Exe |Exe\.|C\.F\.|Exp\.|Resp\.|SNC)\s+' # Cond IVA
-    r'([\d-]{1,13})?\s+'                            # CUIT/DNI (Opcional, incluye "0" para Consumidor Final)
+    r'(.+?)\s+'                                     # Proveedor (Flexible hasta Cond IVA o CUIT)
+    r'(?:(Ins\.|Mono|Monot|Exe |Exe\.|C\.F\.|Exp\.|Resp\.|SNC)\s+)?'  # Cond IVA OPCIONAL (a veces no viene)
+    r'([\d\- ]{1,13})?\s+'                          # CUIT/DNI (Opcional. Permitimos espacios internos por DNIs mal tipeados)
     r'(\d{1,3})\s+'                                 # Concepto
     r'([A-Z0-9])\s+'                                # Jurisdicción (Letra A-Z o 0 para exportación)
     r'(.+)$'                                        # Resto (tasa + montos)
@@ -250,7 +250,7 @@ def parsear_archivo(path: Path = None, content: str = None) -> tuple[list[dict],
             tipo = m.group(2).strip()
             numero = m.group(3).strip()
             proveedor = m.group(4).strip()
-            cond_iva = m.group(5).strip()
+            cond_iva = m.group(5).strip() if m.group(5) else ""
             cuit = m.group(6).strip() if m.group(6) else ""
             concepto = int(m.group(7))
             letra = m.group(8).strip()
@@ -653,22 +653,18 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
         last_sum_col = get_column_letter(col_list.index(other_cols[-1]) + 1) if other_cols else get_column_letter(col_list.index(IVA_COL_ORDER[-1]) + 1)
         total_col_idx = col_list.index('Total') + 1
 
+        # Aplicamos alignment y money format en una sola pasada por celda; ya NO
+        # hacemos la pasada extra de zebra (~325k assignments adicionales) que
+        # era la mas costosa proporcionalmente.
         for row in range(data_start_row, len(df) + data_start_row):
-            # Alinear todas las celdas al centro
             for col_idx in range(1, total_cols + 1):
                 cell = ws.cell(row=row, column=col_idx)
                 cell.alignment = center_align
                 if col_idx in money_col_indices:
                     cell.number_format = active_money_fmt
 
-            # Formula SUM
             ws.cell(row=row, column=total_col_idx).value = f'=SUM({first_sum_col}{row}:{last_sum_col}{row})'
             ws.cell(row=row, column=total_col_idx).number_format = active_money_fmt
-
-            # Estilo Zebra (reusando el objeto fill)
-            if (row - data_start_row) % 2 == 0:
-                for col_idx in range(1, total_cols + 1):
-                    ws.cell(row=row, column=col_idx).fill = zebra_fill
 
         # Fila TOTAL GENERAL en Movimientos
         total_row_mov = len(df) + data_start_row
@@ -2066,46 +2062,12 @@ def crear_excel_consolidado_simple(transacciones: list[dict], meta: dict, output
     for c_idx, col_name in enumerate(cols):
         ws.write_string(HEADER_ROW, c_idx, col_name, _header_fmt_for(col_name))
 
-    # ── Datos ──
+    # ── Anchos de columna + formato moneda a nivel columna ──
+    # Aplicamos formato moneda via set_column (default de la columna) en vez de
+    # por celda. xlsxwriter usa el formato de columna cuando la celda no tiene
+    # uno propio, asi mantenemos la presentacion sin pagar el costo de asignar
+    # un format object en cada una de las ~650k celdas de datos.
     n_rows = len(rows)
-    for r_idx, row_dict in enumerate(rows):
-        excel_row = DATA_START_ROW + r_idx
-        is_zebra = r_idx % 2 == 0
-        plain = plain_zebra_fmt if is_zebra else plain_fmt
-        money = money_zebra_fmt if is_zebra else money_fmt
-
-        for c_idx, col_name in enumerate(cols):
-            val = row_dict.get(col_name, '')
-            if c_idx == total_col_idx:
-                # Formula SUM con valor cacheado para abrir sin recalcular
-                cached = float(val) if isinstance(val, (int, float)) else 0.0
-                ws.write_formula(
-                    excel_row, c_idx,
-                    f'=SUM({first_sum_letter}{excel_row + 1}:{last_sum_letter}{excel_row + 1})',
-                    money, cached
-                )
-            elif c_idx in money_idx_set:
-                num = float(val) if isinstance(val, (int, float)) else 0.0
-                ws.write_number(excel_row, c_idx, num, money)
-            else:
-                if val is None or val == '':
-                    ws.write_blank(excel_row, c_idx, None, plain)
-                elif isinstance(val, (int, float)):
-                    ws.write_number(excel_row, c_idx, val, plain)
-                else:
-                    ws.write_string(excel_row, c_idx, str(val), plain)
-
-    # ── Fila TOTAL GENERAL ──
-    total_row_idx = DATA_START_ROW + n_rows
-    if first_money_idx > 0:
-        ws.merge_range(total_row_idx, 0, total_row_idx, first_money_idx - 1,
-                       'TOTAL GENERAL', total_label_fmt)
-    for c_idx in range(first_money_idx, n_cols):
-        col_letter = xl_col_to_name(c_idx)
-        formula = f'=SUM({col_letter}{DATA_START_ROW + 1}:{col_letter}{total_row_idx})'
-        ws.write_formula(total_row_idx, c_idx, formula, total_money_fmt, 0)
-
-    # ── Anchos de columna (muestra para evitar O(n*m) sobre todo el dataset) ──
     SAMPLE = min(200, n_rows)
     sample_rows = rows[:SAMPLE]
     for c_idx, col_name in enumerate(cols):
@@ -2126,7 +2088,48 @@ def crear_excel_consolidado_simple(transacciones: list[dict], meta: dict, output
                 if len(s) > max_len:
                     max_len = len(s)
             width = max_len + 3
-        ws.set_column(c_idx, c_idx, max(width, 8))
+        # Format por columna: money (alineacion + formato moneda) para money cols,
+        # plain (solo alineacion) para el resto. Asi todas las celdas de datos
+        # heredan alineacion centrada y formato moneda donde corresponde, sin
+        # asignacion por-celda. Lo unico que se pierde respecto del original es la zebra.
+        col_fmt = money_fmt if c_idx in money_idx_set else plain_fmt
+        ws.set_column(c_idx, c_idx, max(width, 8), col_fmt)
+
+    # ── Datos: escritura batch sin estilos por celda ──
+    # Sin alignment, sin zebra, sin format por celda. El formato moneda viene
+    # del column-level. Para datasets grandes es ~3-5x mas rapido que aplicar
+    # un Format object en cada celda.
+    for r_idx, row_dict in enumerate(rows):
+        excel_row = DATA_START_ROW + r_idx
+        for c_idx, col_name in enumerate(cols):
+            val = row_dict.get(col_name, '')
+            if c_idx == total_col_idx:
+                cached = float(val) if isinstance(val, (int, float)) else 0.0
+                ws.write_formula(
+                    excel_row, c_idx,
+                    f'=SUM({first_sum_letter}{excel_row + 1}:{last_sum_letter}{excel_row + 1})',
+                    None, cached
+                )
+            elif c_idx in money_idx_set:
+                num = float(val) if isinstance(val, (int, float)) else 0.0
+                ws.write_number(excel_row, c_idx, num)
+            else:
+                if val is None or val == '':
+                    pass  # celda en blanco sin estilo
+                elif isinstance(val, (int, float)):
+                    ws.write_number(excel_row, c_idx, val)
+                else:
+                    ws.write_string(excel_row, c_idx, str(val))
+
+    # ── Fila TOTAL GENERAL (mantiene estilo) ──
+    total_row_idx = DATA_START_ROW + n_rows
+    if first_money_idx > 0:
+        ws.merge_range(total_row_idx, 0, total_row_idx, first_money_idx - 1,
+                       'TOTAL GENERAL', total_label_fmt)
+    for c_idx in range(first_money_idx, n_cols):
+        col_letter = xl_col_to_name(c_idx)
+        formula = f'=SUM({col_letter}{DATA_START_ROW + 1}:{col_letter}{total_row_idx})'
+        ws.write_formula(total_row_idx, c_idx, formula, total_money_fmt, 0)
 
     wb.close()
     print(f"\n  Excel consolidado (xlsxwriter) generado: {output_path}")
