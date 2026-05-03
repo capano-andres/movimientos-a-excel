@@ -10,7 +10,18 @@ from pathlib import Path
 from openpyxl.styles import Border, Side, Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 import requests
-from extractor_movimientos import parsear_archivo, crear_excel, generar_sifere_txt, generar_sifere_retenciones_txt, generar_percepciones_arba, generar_arba_desde_excel, generar_retenciones_arba, generar_retenciones_arba_desde_excel, construir_sistema_aux_set, CONCEPTOS_MAP, normalizar_csv_ventas_arca, consolidar_ventas_citi, generar_citi_ventas_lineas, generar_citi_alicuotas_lineas, crear_excel_ventas_citi
+
+# Los XLS exportados por Mendez/AddiSyc usan BIFF3 ("Markus Wiederstein Excel Format"),
+# limitado por xlrd a 16.384 filas. Subimos el tope al maximo de Excel moderno
+# para evitar el AssertionError en put_cell_unragged cuando el archivo es grande.
+import xlrd.sheet as _xlrd_sheet
+_orig_sheet_init = _xlrd_sheet.Sheet.__init__
+def _patched_sheet_init(self, *args, **kwargs):
+    _orig_sheet_init(self, *args, **kwargs)
+    self.utter_max_rows = 1048576
+_xlrd_sheet.Sheet.__init__ = _patched_sheet_init
+
+from extractor_movimientos import parsear_archivo, crear_excel, crear_excel_consolidado_simple, generar_sifere_txt, generar_sifere_retenciones_txt, generar_percepciones_arba, generar_arba_desde_excel, generar_retenciones_arba, generar_retenciones_arba_desde_excel, construir_sistema_aux_set, CONCEPTOS_MAP, normalizar_csv_ventas_arca, consolidar_ventas_citi, generar_citi_ventas_lineas, generar_citi_alicuotas_lineas, crear_excel_ventas_citi
 
 @st.cache_data(show_spinner=False)
 def obtener_razon_social_cuitonline(cuit):
@@ -2914,9 +2925,7 @@ elif herramienta == TOOL_CRUCE_CONCEPTO:
 
                         with st.spinner("Generando Excel consolidado..."):
                             output = io.BytesIO()
-                            crear_excel(transacciones, meta_txt, output,
-                                        con_resumenes=False,
-                                        con_auxiliar=False)
+                            crear_excel_consolidado_simple(transacciones, meta_txt, output)
                             output.seek(0)
 
                         st.download_button(

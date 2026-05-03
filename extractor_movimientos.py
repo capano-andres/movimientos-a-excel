@@ -87,7 +87,7 @@ CONCEPTOS_MAP = {
 # El día puede ser 1 o 2 dígitos, el tipo 2-3 chars, el número de comprobante variable
 RE_MAIN = re.compile(
     r'^\s*(\d{1,2})\s+'                            # Dia
-    r'(FC|NC|ND|TF|TK)\s+'                          # Tipo comprobante
+    r'(FC|NC|ND|TF|TK|Li)\s+'                       # Tipo comprobante
     r'(\d{5}-\d{1,12}[A-Z ]?)\s*'                   # Numero (más flexible para exportación)
     r'(.+?)\s+'                                     # Proveedor (Flexible hasta Cond IVA)
     r'(Ins\.|Mono|Monot|Exe |Exe\.|C\.F\.|Exp\.|Resp\.|SNC)\s+' # Cond IVA
@@ -376,13 +376,33 @@ def _autofit(ws, n_cols, start_row=6):
         ws.column_dimensions[letter].width = max(max_len + 3, 8)
 
 
-def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumenes=True, con_auxiliar=False, cruce_arca=False, df_arca=None, con_asiento=False):
-    """Crea un Excel formateado. Cada tasa de IVA tiene sus propias columnas
-    Neto/IVA y cada percepcion/retencion tiene su propia columna.
-    output_path puede ser una ruta o un BytesIO buffer."""
+# ── Constantes y helpers compartidos para la construccion de filas ──
+_DESIRED_IVA_ORDER = [
+    'Neto IVA 21', 'IVA 21',
+    'Neto C.F. 21', 'IVA C.F. 21',
+    'Neto IVA 27', 'IVA 27',
+    'Neto IVA 10.5', 'IVA 10.5',
+    'Neto C.F. 10.5', 'IVA C.F. 10.5',
+    'Neto IVA 5', 'IVA 5',
+    'Neto IVA 2.5', 'IVA 2.5',
+    'Neto Monot. 21', 'IVA Monot. 21',
+    'Neto Monot. 10.5', 'IVA Monot. 10.5',
+    'Neto Imp. 21', 'IVA Imp. 21',
+    'Neto Imp. 10.5', 'IVA Imp. 10.5',
+    'Exento', 'Neto C.F.', 'Monotributo',
+]
 
-    # ── Mapeo de tasas IVA a columnas ─────────────────────────
-    IVA_RATES = {
+_DEDUCCION_KW = ("PERC", "PER.", "PER ", "RET", "SIRCREB", "SIRTAC")
+
+
+def _es_deduccion(nombre: str) -> bool:
+    nu = nombre.upper()
+    return any(kw in nu for kw in _DEDUCCION_KW)
+
+
+def _iva_rates_map(meta: dict) -> dict:
+    """Mapa de tasa-string -> (col Neto, col IVA o None). Expande monotributo en ventas."""
+    iva_rates = {
         'Tasa 21%':  ('Neto IVA 21',   'IVA 21'),
         'T.21%':     ('Neto IVA 21',   'IVA 21'),
         'C.F.21%':   ('Neto C.F. 21',  'IVA C.F. 21'),
@@ -395,6 +415,7 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
         'C.F.10.5%': ('Neto C.F. 10.5', 'IVA C.F. 10.5'),
         'C.F.10,5%': ('Neto C.F. 10.5', 'IVA C.F. 10.5'),
         'Tasa 5%':   ('Neto IVA 5',    'IVA 5'),
+        'TASA 5%':   ('Neto IVA 5',    'IVA 5'),
         'T.5%':      ('Neto IVA 5',    'IVA 5'),
         'Tasa 2.5%': ('Neto IVA 2.5',  'IVA 2.5'),
         'Tasa 2,5%': ('Neto IVA 2.5',  'IVA 2.5'),
@@ -405,37 +426,26 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
         'Exento':    ('Exento',    None),
         'Cons.Fin.': ('Neto C.F.', None),
     }
+    if 'VENTA' in meta.get('tipo_reporte', '').upper():
+        iva_rates['R.Monot21'] = ('Neto Monot. 21', 'IVA Monot. 21')
+        iva_rates['R.Mont.10'] = ('Neto Monot. 10.5', 'IVA Monot. 10.5')
+    return iva_rates
 
-    # En ventas, expandir monotributo a columnas Neto/IVA; en compras, dejar tasa cruda
-    es_ventas = 'VENTA' in meta.get('tipo_reporte', '').upper()
-    if es_ventas:
-        IVA_RATES['R.Monot21'] = ('Neto Monot. 21', 'IVA Monot. 21')
-        IVA_RATES['R.Mont.10'] = ('Neto Monot. 10.5', 'IVA Monot. 10.5')
-    
-    DESIRED_IVA_ORDER = [
-        'Neto IVA 21', 'IVA 21',
-        'Neto C.F. 21', 'IVA C.F. 21',
-        'Neto IVA 27', 'IVA 27',
-        'Neto IVA 10.5', 'IVA 10.5',
-        'Neto C.F. 10.5', 'IVA C.F. 10.5',
-        'Neto IVA 5', 'IVA 5',
-        'Neto IVA 2.5', 'IVA 2.5',
-        'Neto Monot. 21', 'IVA Monot. 21',
-        'Neto Monot. 10.5', 'IVA Monot. 10.5',
-        'Neto Imp. 21', 'IVA Imp. 21',
-        'Neto Imp. 10.5', 'IVA Imp. 10.5',
-        'Exento', 'Neto C.F.', 'Monotributo',
-    ]
 
-    # ── 1. Recopilar sub-conceptos y tasas presentes ────────
+def _construir_filas_consolidado(transacciones: list[dict], meta: dict,
+                                  con_auxiliar: bool = False, cruce_arca: bool = False):
+    """Descubre columnas dinamicas y arma las filas consolidadas (una por comprobante).
+
+    Devuelve (rows, IVA_COL_ORDER, other_cols, IVA_RATES) o (None, None, None, None) si no hay nada.
+    """
     if not transacciones:
-        return
+        return None, None, None, None
+
+    IVA_RATES = _iva_rates_map(meta)
 
     present_iva_cols = set()
-    found_others = []  # Lista ordenada (preserva orden de aparición en TXT)
-    
+    found_others = []  # Preserva orden de aparicion en TXT
     for t in transacciones:
-        # Tasa principal
         tasa = t['Tasa']
         if tasa in IVA_RATES:
             neto_col, iva_col = IVA_RATES[tasa]
@@ -445,8 +455,6 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
             t_clean = tasa.strip()
             if t_clean not in found_others:
                 found_others.append(t_clean)
-            
-        # Sub-conceptos
         for s in t['SubConceptos']:
             conc = s['Concepto']
             if conc in IVA_RATES:
@@ -458,37 +466,24 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
                 if c_clean not in found_others:
                     found_others.append(c_clean)
 
-    IVA_COL_ORDER = [c for c in DESIRED_IVA_ORDER if c in present_iva_cols]
+    IVA_COL_ORDER = [c for c in _DESIRED_IVA_ORDER if c in present_iva_cols]
     if not IVA_COL_ORDER:
-        # Si no hay IVA (ej. todo exento o solo percepciones), usar una columna genérica o solo others
         if not found_others and not present_iva_cols:
-             return # No hay nada que escribir
-        IVA_COL_ORDER = sorted(list(present_iva_cols)) # fallback
-    
-    other_cols = list(found_others)  # Preservar orden de aparición del TXT
-
-    # Helper: detectar si un nombre de columna es una deducción (PERC/RET/SIRCREB)
-    _DEDUCCION_KW = ("PERC", "PER.", "PER ", "RET", "SIRCREB", "SIRTAC")
-    def _es_deduccion(nombre: str) -> bool:
-        nu = nombre.upper()
-        return any(kw in nu for kw in _DEDUCCION_KW)
+            return None, None, None, None
+        IVA_COL_ORDER = sorted(list(present_iva_cols))
 
     # Ordenar: primero no-deducciones (amarillo), luego deducciones (verde)
-    other_cols = [c for c in other_cols if not _es_deduccion(c)] + \
-                 [c for c in other_cols if _es_deduccion(c)]
+    other_cols = [c for c in found_others if not _es_deduccion(c)] + \
+                 [c for c in found_others if _es_deduccion(c)]
 
     rows = []
     for t in transacciones:
-        # Separar Numero (ej: 00002-00000018A) en PV, Nro., Letra
         numero_raw = t['Numero']
-        partes = numero_raw.replace('-', '')
-        # Punto de venta = primeros 5 digitos, Nro = digitos restantes, Letra = ultimo char
         pv = numero_raw.split('-')[0] if '-' in numero_raw else numero_raw[:5]
         resto_num = numero_raw.split('-')[1] if '-' in numero_raw else numero_raw[5:]
         letra = resto_num[-1] if resto_num and resto_num[-1].isalpha() else ''
         nro = resto_num[:-1] if letra else resto_num
 
-        # Limpiar CUIT: quitar guiones y convertir a numerico
         cuit_raw = t['CUIT'].replace('-', '') if t['CUIT'] else ''
         cuit_val = int(cuit_raw) if cuit_raw and cuit_raw.isdigit() else cuit_raw
 
@@ -504,14 +499,11 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
             'Concepto': t['Concepto'],
             'Jur.': t['Letra'],
         }
-        # Inicializar columnas IVA
         for col in IVA_COL_ORDER:
             row[col] = 0.0
-        # Inicializar columnas de otros conceptos
         for col in other_cols:
             row[col] = 0.0
 
-        # Colocar montos de la linea principal
         tasa = t['Tasa']
         if tasa in IVA_RATES:
             neto_col, iva_col = IVA_RATES[tasa]
@@ -519,10 +511,8 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
             if iva_col:
                 row[iva_col] += t['IVA']
         elif tasa:
-            # La tasa es una percepcion/retencion
             row[tasa] += t['Neto']
 
-        # Colocar montos de sub-conceptos
         for s in t['SubConceptos']:
             nombre = s['Concepto']
             if not nombre:
@@ -536,19 +526,31 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
                 monto = s['Neto'] if s['Neto'] != 0.0 else s['Percepcion']
                 row[nombre] += monto
 
-        # Columna Auxiliar: placeholder (formula se agrega después de escribir el Excel)
         if con_auxiliar or cruce_arca:
             row['Auxiliar'] = ''
 
         row['Total'] = t['Total']
 
-        # Notas de credito (NC): invertimos el signo de todos los montos
         if t['Tipo'] == 'NC':
             for col in IVA_COL_ORDER + other_cols:
                 row[col] = -row[col]
             row['Total'] = -row['Total']
 
         rows.append(row)
+
+    return rows, IVA_COL_ORDER, other_cols, IVA_RATES
+
+
+def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumenes=True, con_auxiliar=False, cruce_arca=False, df_arca=None, con_asiento=False):
+    """Crea un Excel formateado. Cada tasa de IVA tiene sus propias columnas
+    Neto/IVA y cada percepcion/retencion tiene su propia columna.
+    output_path puede ser una ruta o un BytesIO buffer."""
+
+    rows, IVA_COL_ORDER, other_cols, IVA_RATES = _construir_filas_consolidado(
+        transacciones, meta, con_auxiliar=con_auxiliar, cruce_arca=cruce_arca
+    )
+    if rows is None:
+        return
 
     df = pd.DataFrame(rows)
 
@@ -559,6 +561,7 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
     print(f"   - NC (Nota Credito): {len(df[df['Tipo'] == 'NC'])}")
     print(f"   - ND (Nota Debito): {len(df[df['Tipo'] == 'ND'])}")
     print(f"   - TF (Ticket Factura): {len(df[df['Tipo'] == 'TF'])}")
+    print(f"   - Li (Liquidacion): {len(df[df['Tipo'] == 'Li'])}")
 
     # ── 3. Escribir Excel ─────────────────────────────────────
     total_cols = len(df.columns)
@@ -1035,14 +1038,15 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
                     if first_iva_idx_rt <= col_idx <= total_idx_rt:
                         if col_name in col_list:
                             v_col = get_column_letter(col_list.index(col_name) + 1)
-                            cell.value = f'=SUMIFS(Movimientos!${v_col}${7}:${v_col}${n_mov+7-1}, Movimientos!${mov_tipo_col}${7}:${mov_tipo_col}${n_mov+7-1}, $A{row})'
+                            # ROUND para evitar drift de centavos al sumar floats no-representables (ej 6629.05).
+                            cell.value = f'=ROUND(SUMIFS(Movimientos!${v_col}${7}:${v_col}${n_mov+7-1}, Movimientos!${mov_tipo_col}${7}:${mov_tipo_col}${n_mov+7-1}, $A{row}),2)'
                             cell.number_format = money_fmt
                         elif col_name == 'Deducciones':
                             formula_parts = []
                             for dc in deduccion_cols:
                                 v_col = get_column_letter(col_list.index(dc) + 1)
                                 formula_parts.append(f'SUMIFS(Movimientos!${v_col}${7}:${v_col}${n_mov+7-1}, Movimientos!${mov_tipo_col}${7}:${mov_tipo_col}${n_mov+7-1}, $A{row})')
-                            cell.value = '=' + '+'.join(formula_parts) if formula_parts else 0
+                            cell.value = ('=ROUND(' + '+'.join(formula_parts) + ',2)') if formula_parts else 0
                             cell.number_format = money_fmt
                         elif col_name == 'Total':
                             # Sumar desde el primer IVA hasta Deducciones
@@ -1139,14 +1143,15 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
                     if first_iva_idx_rc <= col_idx <= total_idx_rc:
                         if col_name in col_list:
                             v_col = get_column_letter(col_list.index(col_name) + 1)
-                            cell.value = f'=SUMIFS(Movimientos!${v_col}${7}:${v_col}${n_mov+7-1}, Movimientos!${mov_conc_col}${7}:${mov_conc_col}${n_mov+7-1}, $A{row})'
+                            # ROUND para evitar drift de centavos al sumar floats no-representables (ej 6629.05).
+                            cell.value = f'=ROUND(SUMIFS(Movimientos!${v_col}${7}:${v_col}${n_mov+7-1}, Movimientos!${mov_conc_col}${7}:${mov_conc_col}${n_mov+7-1}, $A{row}),2)'
                             cell.number_format = money_fmt
                         elif col_name == 'Deducciones':
                             formula_parts = []
                             for dc in deduccion_cols:
                                 v_col = get_column_letter(col_list.index(dc) + 1)
                                 formula_parts.append(f'SUMIFS(Movimientos!${v_col}${7}:${v_col}${n_mov+7-1}, Movimientos!${mov_conc_col}${7}:${mov_conc_col}${n_mov+7-1}, $A{row})')
-                            cell.value = '=' + '+'.join(formula_parts) if formula_parts else 0
+                            cell.value = ('=ROUND(' + '+'.join(formula_parts) + ',2)') if formula_parts else 0
                             cell.number_format = money_fmt
                         elif col_name == 'Total':
                             cell.value = f'=SUM({first_iva_letter_rc}{row}:{ded_letter_rc}{row})'
@@ -1286,7 +1291,8 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
                             f'Movimientos!${mov_conc_col}${7}:${mov_conc_col}${n_mov+7-1}, $A{curr_row}, '
                             f'Movimientos!${mov_jur_col}${7}:${mov_jur_col}${n_mov+7-1}, "{jur}")'
                         )
-                    ws_rj.cell(row=curr_row, column=col_target).value = "=" + "+".join(formula_parts) if formula_parts else 0
+                    # ROUND para evitar drift de centavos al sumar floats no-representables (ej 6629.05).
+                    ws_rj.cell(row=curr_row, column=col_target).value = ("=ROUND(" + "+".join(formula_parts) + ",2)") if formula_parts else 0
                     ws_rj.cell(row=curr_row, column=col_target).number_format = money_fmt
                     ws_rj.cell(row=curr_row, column=col_target).alignment = center_align
             
@@ -1372,14 +1378,15 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
                     if first_iva_idx_res <= col_idx <= total_idx_res:
                         if col_name in col_list:
                             v_col = get_column_letter(col_list.index(col_name) + 1)
-                            cell.value = f'=SUMIFS(Movimientos!${v_col}${7}:${v_col}${n_mov+7-1}, Movimientos!${mov_cuit_col}${7}:${mov_cuit_col}${n_mov+7-1}, $A{row})'
+                            # ROUND para evitar drift de centavos al sumar floats no-representables (ej 6629.05).
+                            cell.value = f'=ROUND(SUMIFS(Movimientos!${v_col}${7}:${v_col}${n_mov+7-1}, Movimientos!${mov_cuit_col}${7}:${mov_cuit_col}${n_mov+7-1}, $A{row}),2)'
                             cell.number_format = money_fmt
                         elif col_name == 'Deducciones':
                             formula_parts = []
                             for dc in deduccion_cols:
                                 v_col = get_column_letter(col_list.index(dc) + 1)
                                 formula_parts.append(f'SUMIFS(Movimientos!${v_col}${7}:${v_col}${n_mov+7-1}, Movimientos!${mov_cuit_col}${7}:${mov_cuit_col}${n_mov+7-1}, $A{row})')
-                            cell.value = '=' + '+'.join(formula_parts) if formula_parts else 0
+                            cell.value = ('=ROUND(' + '+'.join(formula_parts) + ',2)') if formula_parts else 0
                             cell.number_format = money_fmt
                         elif col_name == 'Total':
                             cell.value = f'=SUM({first_iva_letter_res}{row}:{ded_letter_res}{row})'
@@ -1949,6 +1956,182 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
     print(f"\n  Excel guardado en: {output_path}")
 
 
+def crear_excel_consolidado_simple(transacciones: list[dict], meta: dict, output_path):
+    """Version rapida (xlsxwriter) del consolidado: una sola hoja Movimientos,
+    sin resumenes, sin Auxiliar, sin cruce ARCA. ~3-5x mas veloz que crear_excel
+    para datasets grandes (>10k transacciones).
+
+    output_path puede ser una ruta o un BytesIO.
+    """
+    import xlsxwriter
+    from xlsxwriter.utility import xl_col_to_name
+
+    rows, IVA_COL_ORDER, other_cols, _ = _construir_filas_consolidado(
+        transacciones, meta, con_auxiliar=False, cruce_arca=False
+    )
+    if rows is None:
+        return
+
+    # Orden final de columnas
+    base_cols = ['Fecha', 'Tipo', 'PV', 'Nro.', 'Letra', 'Proveedor',
+                 'Cond. IVA', 'CUIT', 'Concepto', 'Jur.']
+    money_cols = IVA_COL_ORDER + other_cols + ['Total']
+    cols = base_cols + IVA_COL_ORDER + other_cols + ['Total']
+    n_cols = len(cols)
+
+    iva_set = set(IVA_COL_ORDER)
+    other_set = set(other_cols)
+    deduccion_set = {c for c in other_cols if _es_deduccion(c)}
+    money_idx_set = {cols.index(c) for c in money_cols}
+    total_col_idx = cols.index('Total')
+    first_money_idx = cols.index(IVA_COL_ORDER[0]) if IVA_COL_ORDER else cols.index(other_cols[0])
+    last_sum_idx = cols.index(other_cols[-1]) if other_cols else cols.index(IVA_COL_ORDER[-1])
+    first_sum_letter = xl_col_to_name(first_money_idx)
+    last_sum_letter = xl_col_to_name(last_sum_idx)
+
+    # ── Workbook (in_memory evita archivos temporales en disco) ──
+    wb = xlsxwriter.Workbook(output_path, {'in_memory': True, 'strings_to_formulas': False})
+    ws = wb.add_worksheet('Movimientos')
+
+    # ── Formatos: una sola instancia compartida por todas las celdas que matchean ──
+    title_fmt = wb.add_format({
+        'bold': True, 'font_size': 14, 'font_color': '#FFFFFF',
+        'bg_color': '#2F5496', 'align': 'center', 'valign': 'vcenter'
+    })
+    subtitle_red_fmt = wb.add_format({
+        'bold': True, 'font_size': 12, 'font_color': '#C00000',
+        'align': 'center', 'valign': 'vcenter'
+    })
+    subtitle_blue_fmt = wb.add_format({
+        'bold': True, 'font_size': 11, 'font_color': '#2F5496',
+        'align': 'center', 'valign': 'vcenter'
+    })
+    subtitle_italic_fmt = wb.add_format({
+        'italic': True, 'font_size': 10, 'font_color': '#4472C4',
+        'align': 'center', 'valign': 'vcenter'
+    })
+
+    header_base = {
+        'bold': True, 'font_size': 10, 'font_color': '#FFFFFF',
+        'align': 'center', 'valign': 'vcenter', 'text_wrap': True, 'border': 1,
+    }
+    header_default_fmt = wb.add_format({**header_base, 'bg_color': '#4472C4'})
+    header_iva_fmt = wb.add_format({**header_base, 'bg_color': '#BF8F00'})
+    header_perc_fmt = wb.add_format({**header_base, 'bg_color': '#70AD47'})
+
+    money_num_fmt = '$#,##0.00'
+    plain_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter'})
+    plain_zebra_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'bg_color': '#D6E4F0'})
+    money_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'num_format': money_num_fmt})
+    money_zebra_fmt = wb.add_format({
+        'align': 'center', 'valign': 'vcenter',
+        'num_format': money_num_fmt, 'bg_color': '#D6E4F0'
+    })
+
+    # top=6 -> double border
+    total_label_fmt = wb.add_format({
+        'bold': True, 'align': 'right', 'valign': 'vcenter', 'top': 6
+    })
+    total_money_fmt = wb.add_format({
+        'bold': True, 'align': 'center', 'valign': 'vcenter',
+        'num_format': money_num_fmt, 'top': 6
+    })
+
+    def _header_fmt_for(col_name):
+        if col_name in iva_set or (col_name in other_set and col_name not in deduccion_set):
+            return header_iva_fmt
+        if col_name in deduccion_set:
+            return header_perc_fmt
+        return header_default_fmt
+
+    # ── Bloque de titulo (filas 0-3 xlsxwriter = 1-4 Excel) ──
+    last_col_idx = n_cols - 1
+    razon_social = (meta.get('razon_social') or 'CONTRIBUYENTE').upper()
+    tipo_reporte = (meta.get('tipo_reporte') or 'REPORTE DE MOVIMIENTOS').upper()
+
+    ws.merge_range(0, 0, 0, last_col_idx, razon_social, title_fmt)
+    ws.merge_range(1, 0, 1, last_col_idx, tipo_reporte, subtitle_red_fmt)
+    ws.merge_range(2, 0, 2, last_col_idx,
+                   f"CUIT: {meta.get('cuit_empresa', '')} | Periodo: {meta.get('periodo', '')}",
+                   subtitle_blue_fmt)
+    ws.merge_range(3, 0, 3, last_col_idx,
+                   f"Total: {len(rows)} transacciones",
+                   subtitle_italic_fmt)
+
+    # Fila 4 (Excel 5) vacia. Headers en fila 5 (Excel 6)
+    HEADER_ROW = 5
+    DATA_START_ROW = 6
+
+    ws.set_row(HEADER_ROW, 30)
+    for c_idx, col_name in enumerate(cols):
+        ws.write_string(HEADER_ROW, c_idx, col_name, _header_fmt_for(col_name))
+
+    # ── Datos ──
+    n_rows = len(rows)
+    for r_idx, row_dict in enumerate(rows):
+        excel_row = DATA_START_ROW + r_idx
+        is_zebra = r_idx % 2 == 0
+        plain = plain_zebra_fmt if is_zebra else plain_fmt
+        money = money_zebra_fmt if is_zebra else money_fmt
+
+        for c_idx, col_name in enumerate(cols):
+            val = row_dict.get(col_name, '')
+            if c_idx == total_col_idx:
+                # Formula SUM con valor cacheado para abrir sin recalcular
+                cached = float(val) if isinstance(val, (int, float)) else 0.0
+                ws.write_formula(
+                    excel_row, c_idx,
+                    f'=SUM({first_sum_letter}{excel_row + 1}:{last_sum_letter}{excel_row + 1})',
+                    money, cached
+                )
+            elif c_idx in money_idx_set:
+                num = float(val) if isinstance(val, (int, float)) else 0.0
+                ws.write_number(excel_row, c_idx, num, money)
+            else:
+                if val is None or val == '':
+                    ws.write_blank(excel_row, c_idx, None, plain)
+                elif isinstance(val, (int, float)):
+                    ws.write_number(excel_row, c_idx, val, plain)
+                else:
+                    ws.write_string(excel_row, c_idx, str(val), plain)
+
+    # ── Fila TOTAL GENERAL ──
+    total_row_idx = DATA_START_ROW + n_rows
+    if first_money_idx > 0:
+        ws.merge_range(total_row_idx, 0, total_row_idx, first_money_idx - 1,
+                       'TOTAL GENERAL', total_label_fmt)
+    for c_idx in range(first_money_idx, n_cols):
+        col_letter = xl_col_to_name(c_idx)
+        formula = f'=SUM({col_letter}{DATA_START_ROW + 1}:{col_letter}{total_row_idx})'
+        ws.write_formula(total_row_idx, c_idx, formula, total_money_fmt, 0)
+
+    # ── Anchos de columna (muestra para evitar O(n*m) sobre todo el dataset) ──
+    SAMPLE = min(200, n_rows)
+    sample_rows = rows[:SAMPLE]
+    for c_idx, col_name in enumerate(cols):
+        if col_name == 'Fecha':
+            width = 8
+        elif c_idx in money_idx_set:
+            max_abs = 0.0
+            for r in sample_rows:
+                v = r.get(col_name, 0.0)
+                if isinstance(v, (int, float)) and abs(v) > max_abs:
+                    max_abs = abs(v)
+            width = max(len(f'${max_abs:,.2f}'), len(col_name)) + 2
+        else:
+            max_len = len(col_name)
+            for r in sample_rows:
+                v = r.get(col_name, '')
+                s = str(v) if v is not None else ''
+                if len(s) > max_len:
+                    max_len = len(s)
+            width = max_len + 3
+        ws.set_column(c_idx, c_idx, max(width, 8))
+
+    wb.close()
+    print(f"\n  Excel consolidado (xlsxwriter) generado: {output_path}")
+
+
 def generar_sifere_txt(transacciones: list[dict], meta: dict) -> str:
     """Genera un archivo TXT con formato SIFERE para percepciones de IIBB.
     Cada línea: CodJurisdiccion(3) + CUIT(11) + Fecha(DD/MM/YYYY) + PV(4) + Nro(8) + TipoComp(2) + Monto(11)
@@ -1989,6 +2172,7 @@ def generar_sifere_txt(transacciones: list[dict], meta: dict) -> str:
         "NC": "CA",
         "TF": "FA",
         "TK": "FA",
+        "Li": "FA",
     }
 
     # ── Tasas IVA (para excluirlas de percepciones) ──
@@ -2171,7 +2355,7 @@ def generar_sifere_retenciones_txt(transacciones: list[dict], meta: dict) -> str
 
     # ── Mapeo tipo comprobante del sistema → tipo SIFERE retenciones (1 char) ──
     TIPO_COMP_RET = {
-        "FC": "F", "TF": "F", "TK": "F",
+        "FC": "F", "TF": "F", "TK": "F", "Li": "F",
         "NC": "C",
         "ND": "D",
     }
@@ -2343,7 +2527,7 @@ def generar_percepciones_arba(transacciones: list[dict], meta: dict) -> tuple[st
     """
     # ── Mapeo tipo comprobante del sistema → código ARBA (1 char) ──
     TIPO_COMP_ARBA = {
-        "FC": "F", "TF": "F", "TK": "F",
+        "FC": "F", "TF": "F", "TK": "F", "Li": "F",
         "NC": "C",
         "ND": "D",
         "RC": "R",
