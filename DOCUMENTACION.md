@@ -13,7 +13,7 @@
    - [Generadores de archivos regulatorios](#generadores-de-archivos-regulatorios)
 5. [Interfaz Web: `app.py`](#interfaz-web-apppy)
    - [Sistema de diseño CSS](#sistema-de-diseño-css)
-   - [Las 11 herramientas](#las-11-herramientas)
+   - [Las 12 herramientas](#las-12-herramientas)
 6. [Flujo de Datos Completo](#flujo-de-datos-completo)
 7. [Diagramas de Arquitectura](#diagramas-de-arquitectura)
 8. [Archivos Auxiliares](#archivos-auxiliares)
@@ -63,6 +63,7 @@ graph TD
         B --> H9["9. Cruce Deducciones TXT"]
         B --> H10["10. Importación Compras (TXT + ZIP ARCA → ZIPs por Concepto)"]
     B --> H11["11. Armado .zip Importación Ventas / CITI (ZIP ARCA → VENTAS.txt + ALICUOTAS.txt)"]
+    B --> H12["12. Importación Retenciones IVA / Ganancias (XLS ARCA → .zip Portal IVA)"]
     end
 
     subgraph "Backend - extractor_movimientos.py"
@@ -72,6 +73,8 @@ graph TD
         P --> S3["generar_percepciones_arba_txt()"]
         CV["consolidar_ventas_citi()"] --> CL1["generar_citi_ventas_lineas()"]
         CV --> CL2["generar_citi_alicuotas_lineas()"]
+        PR["parsear_arca_retenciones_xls()"] --> TR["transformar_retenciones_a_csv_arca()"]
+        TR --> ZR["generar_zip_retenciones_arca()"]
     end
 
     H1 --> P
@@ -82,6 +85,7 @@ graph TD
     H9 --> P
     H10 --> P
     H11 --> CV
+    H12 --> PR
 ```
 
 ---
@@ -600,7 +604,7 @@ La aplicación tiene un tema oscuro personalizado ("dark mode premium") con vari
 
 ---
 
-### Las 11 herramientas
+### Las 12 herramientas
 
 #### 1. Listado por fecha TXT Mendez a Excel limpio
 
@@ -1079,6 +1083,79 @@ Suma de anchos: 3+5+20+15+4+15 = **62** ✓
 
 ---
 
+#### 12. Importación Retenciones IVA / Ganancias (XLS ARCA → .zip Portal IVA)
+
+Convierte los XLS de **"Mis Retenciones/Percepciones"** de ARCA en un `.zip` con un CSV adentro byte-equivalente al que produce el Portal IVA de ARCA, listo para alimentar al sistema interno (Mendez) sin retoques. Reemplaza el flujo manual con el template Excel `FORMULA PARA IMPORTAR RETENCIONES V.2.0.xlsx` (pegar datos en hoja `mis re` → exportar la hoja con fórmulas a CSV → empaquetar a mano).
+
+**Problema que resuelve:**
+
+El sistema Mendez importa las retenciones de IVA y Ganancias del régimen SICORE como si fueran comprobantes del Portal IVA, lo que requiere transformar los XLS de ARCA al formato de 32 columnas del Portal IVA (con `Tipo Cbte = 99`, fechas en `YYYY-MM-DD`, importe argentino, encoding `latin-1`, etc.). Esa transformación se hacía con un Excel macro/fórmulas — la herramienta la automatiza partiendo del XLS tal cual lo baja el contribuyente.
+
+**Inputs:**
+
+- **Tipo de retención**: radio de selección excluyente (`IVA` o `Ganancias`).
+- **XLS de ARCA** del tipo elegido (`IVA.xls` o `GANANCIAS.xls`), con las **14 columnas estándar** de Mis Retenciones/Percepciones: `CUIT Agente Ret./Perc.`, `Denominación o Razón Social`, `Impuesto`, `Descripción Impuesto`, `Régimen`, `Descripción Régimen`, `Fecha Ret./Perc.`, `Número Certificado`, `Descripción Operación`, `Importe Ret./Perc.`, `Número Comprobante`, `Fecha Comprobante`, `Descripción Comprobante`, `Fecha Registración DJ Ag.Ret.`.
+
+**Algoritmo:**
+
+1. **Parsea** el XLS con `parsear_arca_retenciones_xls()` → `pd.read_excel(io.BytesIO(...))` (delega a `xlrd` ya parchado para `utter_max_rows`). Valida que las 5 columnas críticas estén presentes (CUIT Agente, Denominación, Fecha Ret., Número Certificado, Importe). Si faltan → `ValueError` con detalle.
+2. **Transforma** con `transformar_retenciones_a_csv_arca()` aplicando el mapeo del template Excel:
+
+   | # Columna salida | Fuente / regla |
+   |---|---|
+   | 1 Fecha de Emisión | `Fecha Ret./Perc.` (`DD/MM/YYYY`) → `YYYY-MM-DD` |
+   | 2 Tipo de Comprobante | `99` (constante) |
+   | 3 Punto de Venta | `Número Certificado[:2]` (primeros 2 chars) |
+   | 4 Número de Comprobante | `Número Certificado[-8:]` (últimos 8 chars) |
+   | 5 Tipo Doc. Vendedor | `80` (constante, CUIT) |
+   | 6 Nro. Doc. Vendedor | `CUIT Agente Ret./Perc.` |
+   | 7 Denominación Vendedor | `Denominación o Razón Social` |
+   | 8 Importe Total | `Importe Ret./Perc.` formato argentino `1.234,56` |
+   | 9 Moneda Original | `PES` |
+   | 10 Tipo de Cambio | `1` |
+   | 14 Importe de Per. o Pagos a Cta. de Otros Imp. Nac. | `Importe Ret./Perc.` (mismo importe que col 8) |
+   | 11–13, 15–32 | vacíos |
+
+3. **Empaqueta** con `generar_zip_retenciones_arca()`: serializa el DataFrame a CSV con `to_csv(sep=';', lineterminator='\n')`, lo encodea a `latin-1` (reemplazando errores) y lo escribe dentro de un `.zip` siguiendo el patrón de naming del Portal IVA de ARCA: `comprobantes_periodo_{YYYYMM}_compras_{YYYYMMDD}_{HHMM}.zip` (CSV interno con el mismo basename `.csv`). El `YYYYMM` se infiere del mes/año más frecuente de `Fecha Ret./Perc.`; el timestamp `YYYYMMDD_HHMM` es la hora actual.
+
+**Headers de salida — byte-equivalentes al template Excel:**
+
+> [!IMPORTANT]
+> El template original `FORMULA PARA IMPORTAR RETENCIONES V.2.0.xlsx` tiene los headers con **doble-encoding mojibake** (ej. `Fecha de EmisiÃ³n` en lugar de `Fecha de Emisión`) — probablemente porque quien lo armó pegó headers de un CSV `latin-1` interpretándolos como UTF-8. La herramienta **respeta esos headers exactos** porque cuando se exportan a CSV con encoding `latin-1` producen los bytes `0xC3 0xB3` (la representación correcta de `ó` en UTF-8 vista como dos chars latin-1), que es lo que el sistema Mendez espera al re-leer en latin-1. Cambiar los headers por la forma "limpia" rompería la importación.
+
+**Layout del CSV de salida (32 columnas):**
+
+```
+Fecha de Emisión;Tipo de Comprobante;Punto de Venta;Número de Comprobante;Tipo Doc. Vendedor;Nro. Doc. Vendedor;Denominación Vendedor;Importe Total;Moneda Original;Tipo de Cambio;Importe No Gravado;Importe Exento;Crédito Fiscal Computable; Importe de Per. o Pagos a Cta. de Otros Imp. Nac. ;Importe de Percepciones de Ingresos Brutos;Importe de Impuestos Municipales;Importe de Percepciones o Pagos a Cuenta de IVA;Importe de Impuestos Internos;Importe Otros Tributos;Neto Gravado IVA 0%;Neto Gravado IVA 2,5%;Importe IVA 2,5%;Neto Gravado IVA 5%;Importe IVA 5%;Neto Gravado IVA 10,5%;Importe IVA 10,5%;Neto Gravado IVA 21%;Importe IVA 21%;Neto Gravado IVA 27%;Importe IVA 27%;Total Neto Gravado;Total IVA
+```
+
+**Ejemplo (fila 1 de IVA.xls — retención SICORE-IVA del 31/03/2026 a Aceitera General Deheza):**
+
+```
+2026-03-31;99;20;26079026;80;30502874353;ACEITERA GENERAL DEHEZA S.A.;42.680,64;PES;1;;;;42.680,64;;;;;;;;;;;;;;;;;;
+```
+
+Desglose: PV=`20` y Nro=`26079026` salen del slicing del **Número Certificado** (`2026079026`); el `Importe Total` y la columna 14 llevan el mismo monto de la retención.
+
+**UI (4 cards):**
+
+- **Card 01** — Tipo de retención: radio horizontal `IVA` / `Ganancias`. Al cambiar el tipo se limpia cualquier resultado previo de `st.session_state` para evitar que un .zip viejo aparezca para descarga después de un cambio de selección.
+- **Card 02** — Uploader: `st.file_uploader(type=["xls", "xlsx"])` con `key=f"ret_xls_{tipo.lower()}"` (clave dinámica por tipo, así Streamlit no mezcla estados al togglear).
+- **Card 03** — Botón `⬡ Generar .zip`: parsea + transforma + empaqueta en un solo flujo. Persiste `ret_zip_bytes`, `ret_zip_name`, `ret_count`, `ret_periodo`, `ret_tipo_generado` en session_state. Muestra `stats-row` con cantidad de retenciones procesadas + período detectado.
+- **Card 04** — Descarga: `st.download_button` con label `↓ .zip Retenciones {tipo} ({periodo})` y `file_name` = el zip_name del Portal IVA. Aparece sólo cuando hay un `.zip` listo en session_state.
+
+> [!NOTE]
+> **Nombre del .zip incluye `compras` aunque sean retenciones**: respeta el patrón nominal del Portal IVA (`comprobantes_periodo_..._compras_...`) porque el sistema Mendez importa las retenciones por la misma vía que los comprobantes de compras. No es un bug — es el diseño esperado.
+
+**Reutiliza:**
+
+- `pd.read_excel()` con el patch global de `xlrd.utter_max_rows` ([app.py:14-22](app.py#L14-L22)) — mismo flujo de lectura XLS de la herramienta 6 (Limpieza Excel Deducciones).
+- Patrón de empaquetado ZIP en memoria (`zipfile.ZipFile(BytesIO, 'w')`) — herramientas 4, 10, 11.
+- Patrón de `st.session_state` para persistir bytes de descarga entre re-runs — mismo patrón de la herramienta 11 (CITI Ventas) y la 2 (modo Edición .zip).
+- Sistema de cards `.card / .card-label / .stats-row / .stat-chip` del CSS global ([app.py:64-477](app.py#L64-L477)).
+
+---
+
 ## Flujo de Datos Completo
 
 ```mermaid
@@ -1112,6 +1189,7 @@ flowchart TB
         E4["📊 Excel dorado<br/>(Ret + Perc sheets)"]
         S1["📄 TXT SIFERE<br/>(posicional fijo)"]
         S2["📄 TXT ARBA<br/>(71 chars/línea)"]
+        Z1["📦 ZIP Portal IVA<br/>(CSV 32 cols latin-1)"]
     end
 
     TXT --> P1 --> T1 --> E1
@@ -1122,6 +1200,7 @@ flowchart TB
     DED --> P4 --> E4
     TXT --> P1
     XLS --> P4 --> T4 --> E1
+    DED --> P4 --> Z1
 ```
 
 ---
@@ -1146,8 +1225,8 @@ Excluye el directorio `venv/` y archivos de caché Python del control de version
 
 | Métrica | Valor |
 |---------|-------|
-| Líneas totales de código | **~7,290** (app.py: ~4,550 + extractor: ~2,740) |
-| Herramientas de la UI | **11** |
+| Líneas totales de código | **~9,150** (app.py: ~5,265 + extractor: ~3,890) |
+| Herramientas de la UI | **12** |
 | Hojas Excel posibles | **13** (Movimientos + 6 resúmenes + Asiento + ARCA + overflow ×2 + DE MAS ×2) |
 | Modos del Asiento Contable | **2** (Compras / Ventas, autodetectados desde `meta['tipo_reporte']`) + bloque opcional de Restitución de IVA por NCs |
 | Organismos soportados en Cruce de Deducciones | **4** (ARBA, AGIP, IVA/ARCA, Ganancias/ARCA) |

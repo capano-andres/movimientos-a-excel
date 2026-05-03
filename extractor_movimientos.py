@@ -3662,6 +3662,200 @@ def crear_excel_ventas_citi(
         wb.save(str(output))
 
 
+# ════════════════════════════════════════════════════════════════════════════════
+#  IMPORTACION DE RETENCIONES IVA / GANANCIAS — XLS ARCA → ZIP Portal IVA
+# ════════════════════════════════════════════════════════════════════════════════
+
+# Headers del CSV de salida — replican exactamente la hoja "FORMULA PARA IMPORTAR
+# RETENCION" del template Excel original (con doble-encoding mojibake en algunos
+# nombres). Mantenerlos byte-equivalentes al template asegura que el sistema
+# Mendez los acepte igual que cuando el operador exporta a CSV manualmente.
+RETENCIONES_OUTPUT_HEADERS = [
+    "Fecha de EmisiÃ³n",
+    "Tipo de Comprobante",
+    "Punto de Venta",
+    "NÃºmero de Comprobante",
+    "Tipo Doc. Vendedor",
+    "Nro. Doc. Vendedor",
+    "DenominaciÃ³n Vendedor",
+    "Importe Total",
+    "Moneda Original",
+    "Tipo de Cambio",
+    "Importe No Gravado",
+    "Importe Exento",
+    "CrÃ©dito Fiscal Computable",
+    " Importe de Per. o Pagos a Cta. de Otros Imp. Nac. ",
+    "Importe de Percepciones de Ingresos Brutos",
+    "Importe de Impuestos Municipales",
+    "Importe de Percepciones o Pagos a Cuenta de IVA",
+    "Importe de Impuestos Internos",
+    "Importe Otros Tributos",
+    "Neto Gravado IVA 0%",
+    "Neto Gravado IVA 2,5%",
+    "Importe IVA 2,5%",
+    "Neto Gravado IVA 5%",
+    "Importe IVA 5%",
+    "Neto Gravado IVA 10,5%",
+    "Importe IVA 10,5%",
+    "Neto Gravado IVA 21%",
+    "Importe IVA 21%",
+    "Neto Gravado IVA 27%",
+    "Importe IVA 27%",
+    "Total Neto Gravado",
+    "Total IVA",
+]
+
+# Headers obligatorios del XLS de Mis Retenciones/Percepciones de ARCA. El parser
+# valida que estén presentes antes de transformar.
+RETENCIONES_INPUT_HEADERS = [
+    'CUIT Agente Ret./Perc.',
+    'Denominación o Razón Social',
+    'Fecha Ret./Perc.',
+    'Número Certificado',
+    'Importe Ret./Perc.',
+]
+
+
+def parsear_arca_retenciones_xls(file_bytes: bytes) -> pd.DataFrame:
+    """Lee el XLS de Mis Retenciones/Percepciones de ARCA y valida estructura.
+
+    Devuelve el DataFrame crudo. Lanza ValueError si faltan columnas requeridas
+    o si el archivo está vacío.
+    """
+    df = pd.read_excel(io.BytesIO(file_bytes))
+    if df.empty:
+        raise ValueError("El archivo XLS está vacío.")
+    faltantes = [c for c in RETENCIONES_INPUT_HEADERS if c not in df.columns]
+    if faltantes:
+        raise ValueError(
+            "El archivo no parece ser un XLS de Mis Retenciones/Percepciones de ARCA. "
+            f"Faltan columnas: {faltantes}"
+        )
+    return df
+
+
+def _fmt_importe_arg(val) -> str:
+    """Formatea un número en notación argentina (1.234,56) con 2 decimales fijos."""
+    if val is None or pd.isna(val):
+        return ''
+    s = f"{float(val):,.2f}"
+    return s.replace(',', '\x00').replace('.', ',').replace('\x00', '.')
+
+
+def _fmt_fecha_iso(s) -> str:
+    """Convierte 'DD/MM/YYYY' → 'YYYY-MM-DD'. Acepta datetime, string ISO o vacío."""
+    if s is None:
+        return ''
+    if hasattr(s, 'strftime'):
+        return s.strftime('%Y-%m-%d')
+    if isinstance(s, float) and pd.isna(s):
+        return ''
+    s = str(s).strip()
+    if not s:
+        return ''
+    if len(s) == 10 and s[2] == '/' and s[5] == '/':
+        return f"{s[6:10]}-{s[3:5]}-{s[0:2]}"
+    if len(s) >= 10 and s[4] == '-' and s[7] == '-':
+        return s[:10]
+    return s
+
+
+def _str_int_safe(val) -> str:
+    """Convierte un valor numérico (int/float) a string sin '.0' al final."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return ''
+    s = str(val).strip()
+    if s.endswith('.0'):
+        s = s[:-2]
+    return s
+
+
+def transformar_retenciones_a_csv_arca(df: pd.DataFrame):
+    """Transforma el DataFrame del XLS ARCA al CSV formato Portal IVA.
+
+    Aplica el mapeo de la hoja "FORMULA PARA IMPORTAR RETENCION" del template:
+      - Fecha de Emisión = Fecha Ret./Perc. reformateada YYYY-MM-DD
+      - Tipo Cbte = 99 (constante)
+      - PV = primeros 2 chars del Número Certificado
+      - Nro = últimos 8 chars del Número Certificado
+      - Tipo Doc Vend = 80 (constante, CUIT)
+      - Nro Doc = CUIT Agente Ret./Perc.
+      - Denominación = Denominación o Razón Social
+      - Importe Total = Importe Ret./Perc.
+      - Moneda = PES, TC = 1
+      - Importe de Per. o Pagos a Cta. de Otros Imp. Nac. = Importe Ret./Perc.
+
+    Devuelve (csv_text, periodo_yyyymm) donde periodo_yyyymm es el mes/año más
+    frecuente de Fecha Ret./Perc.
+    """
+    from collections import Counter
+    from datetime import datetime as _dt
+
+    rows = []
+    meses = []
+    for _, src in df.iterrows():
+        fecha_iso = _fmt_fecha_iso(src['Fecha Ret./Perc.'])
+        if len(fecha_iso) == 10:
+            meses.append(fecha_iso[:4] + fecha_iso[5:7])  # YYYYMM
+
+        cert_s = _str_int_safe(src['Número Certificado'])
+        cuit_s = _str_int_safe(src['CUIT Agente Ret./Perc.'])
+
+        denom = src['Denominación o Razón Social']
+        denom_s = '' if (denom is None or (isinstance(denom, float) and pd.isna(denom))) else str(denom).strip()
+
+        importe_s = _fmt_importe_arg(src['Importe Ret./Perc.'])
+
+        rows.append([
+            fecha_iso,    # 1  Fecha de Emisión
+            '99',         # 2  Tipo de Comprobante
+            cert_s[:2],   # 3  Punto de Venta
+            cert_s[-8:],  # 4  Número de Comprobante
+            '80',         # 5  Tipo Doc. Vendedor
+            cuit_s,       # 6  Nro. Doc. Vendedor
+            denom_s,      # 7  Denominación Vendedor
+            importe_s,    # 8  Importe Total
+            'PES',        # 9  Moneda Original
+            '1',          # 10 Tipo de Cambio
+            '',           # 11 Importe No Gravado
+            '',           # 12 Importe Exento
+            '',           # 13 Crédito Fiscal Computable
+            importe_s,    # 14 Importe de Per. o Pagos a Cta. de Otros Imp. Nac.
+        ] + [''] * 18)    # 15-32 vacíos
+
+    if meses:
+        periodo = Counter(meses).most_common(1)[0][0]
+    else:
+        periodo = _dt.now().strftime('%Y%m')
+
+    df_out = pd.DataFrame(rows, columns=RETENCIONES_OUTPUT_HEADERS)
+    csv_text = df_out.to_csv(sep=';', index=False, lineterminator='\n')
+    return csv_text, periodo
+
+
+def generar_zip_retenciones_arca(csv_text: str, periodo_yyyymm: str, *, now=None):
+    """Empaqueta el CSV en un .zip con el patrón de naming del Portal IVA.
+
+    Patrón: comprobantes_periodo_{YYYYMM}_compras_{YYYYMMDD}_{HHMM}.zip
+    El CSV interno usa el mismo nombre base con extensión .csv. Encoding latin-1.
+    Devuelve (zip_bytes, zip_name).
+    """
+    import zipfile
+    from datetime import datetime as _dt
+
+    if now is None:
+        now = _dt.now()
+    timestamp = now.strftime('%Y%m%d_%H%M')
+    basename = f"comprobantes_periodo_{periodo_yyyymm}_compras_{timestamp}"
+    zip_name = f"{basename}.zip"
+    csv_name = f"{basename}.csv"
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(csv_name, csv_text.encode('latin-1', errors='replace'))
+    return buf.getvalue(), zip_name
+
+
 def main():
     # Forzar UTF-8 en la consola de Windows (solo cuando se corre como script)
     import sys, io

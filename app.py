@@ -21,7 +21,7 @@ def _patched_sheet_init(self, *args, **kwargs):
     self.utter_max_rows = 1048576
 _xlrd_sheet.Sheet.__init__ = _patched_sheet_init
 
-from extractor_movimientos import parsear_archivo, crear_excel, crear_excel_consolidado_simple, generar_sifere_txt, generar_sifere_retenciones_txt, generar_percepciones_arba, generar_arba_desde_excel, generar_retenciones_arba, generar_retenciones_arba_desde_excel, construir_sistema_aux_set, CONCEPTOS_MAP, normalizar_csv_ventas_arca, consolidar_ventas_citi, generar_citi_ventas_lineas, generar_citi_alicuotas_lineas, crear_excel_ventas_citi
+from extractor_movimientos import parsear_archivo, crear_excel, crear_excel_consolidado_simple, generar_sifere_txt, generar_sifere_retenciones_txt, generar_percepciones_arba, generar_arba_desde_excel, generar_retenciones_arba, generar_retenciones_arba_desde_excel, construir_sistema_aux_set, CONCEPTOS_MAP, normalizar_csv_ventas_arca, consolidar_ventas_citi, generar_citi_ventas_lineas, generar_citi_alicuotas_lineas, crear_excel_ventas_citi, parsear_arca_retenciones_xls, transformar_retenciones_a_csv_arca, generar_zip_retenciones_arca
 
 @st.cache_data(show_spinner=False)
 def obtener_razon_social_cuitonline(cuit):
@@ -488,10 +488,11 @@ TOOL_CM05 = "Papeles de Trabajo CM05"
 TOOL_CRUCE_DEDUCCIONES = "Cruce de Deducciones"
 TOOL_IMPORTACION = "Importacion Compras (TXT + ZIP ARCA -> ZIPs por Concepto)"
 TOOL_VENTAS_CITI = "Armado .zip Importacion Ventas / CITI (ZIP ARCA -> VENTAS.txt + ALICUOTAS.txt)"
+TOOL_RETENCIONES = "Importacion Retenciones IVA / Ganancias (XLS ARCA -> .zip Portal IVA)"
 
 herramienta = st.selectbox(
     "Seleccioná la herramienta:",
-    options=[TOOL_MOVIMIENTOS, TOOL_PORTAL_IVA, TOOL_SIFERE, TOOL_ARBA, TOOL_LIQUIDACIONES, TOOL_DEDUCCIONES, TOOL_CRUCE_CONCEPTO, TOOL_CM05, TOOL_CRUCE_DEDUCCIONES, TOOL_IMPORTACION, TOOL_VENTAS_CITI],
+    options=[TOOL_MOVIMIENTOS, TOOL_PORTAL_IVA, TOOL_SIFERE, TOOL_ARBA, TOOL_LIQUIDACIONES, TOOL_DEDUCCIONES, TOOL_CRUCE_CONCEPTO, TOOL_CM05, TOOL_CRUCE_DEDUCCIONES, TOOL_IMPORTACION, TOOL_VENTAS_CITI, TOOL_RETENCIONES],
     index=0,
 )
 
@@ -5170,6 +5171,93 @@ elif herramienta == TOOL_VENTAS_CITI:
             letter-spacing: 0.12em;
         ">
             SUBÍ EL .ZIP DEL PORTAL IVA · VENTAS
+        </div>
+        """, unsafe_allow_html=True)
+
+elif herramienta == TOOL_RETENCIONES:
+    # ───────────────────────────────────────────────────────────────────────────────
+    # HERRAMIENTA: Importacion Retenciones IVA / Ganancias (XLS ARCA -> .zip Portal IVA)
+    # ───────────────────────────────────────────────────────────────────────────────
+    st.markdown('<div class="card"><div class="card-label">01 · Tipo de retención</div>', unsafe_allow_html=True)
+    tipo_ret = st.radio(
+        "Elegí el impuesto a procesar:",
+        options=["IVA", "Ganancias"],
+        horizontal=True,
+        key="ret_tipo",
+    )
+    # Si cambia el tipo, limpiar resultados previos para no mostrar descargas viejas
+    if st.session_state.get('ret_last_tipo') != tipo_ret:
+        for k in ('ret_zip_bytes', 'ret_zip_name', 'ret_count', 'ret_periodo', 'ret_tipo_generado'):
+            st.session_state.pop(k, None)
+        st.session_state['ret_last_tipo'] = tipo_ret
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown(f'<div class="card"><div class="card-label">02 · Archivo {tipo_ret} (.xls / .xlsx)</div>', unsafe_allow_html=True)
+    st.caption(f"Subí el XLS de Mis Retenciones de {tipo_ret} descargado de ARCA.")
+    uploaded_ret = st.file_uploader(
+        f"{tipo_ret}.xls",
+        type=["xls", "xlsx"],
+        label_visibility="collapsed",
+        key=f"ret_xls_{tipo_ret.lower()}",
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if uploaded_ret:
+        st.markdown('<div class="card"><div class="card-label">03 · Generar .zip Portal IVA</div>', unsafe_allow_html=True)
+
+        if st.button("⬡  Generar .zip"):
+            try:
+                with st.spinner(f"Procesando retenciones de {tipo_ret}..."):
+                    df = parsear_arca_retenciones_xls(uploaded_ret.getvalue())
+                    csv_text, periodo = transformar_retenciones_a_csv_arca(df)
+                    zip_bytes, zip_name = generar_zip_retenciones_arca(csv_text, periodo)
+                    st.session_state['ret_zip_bytes'] = zip_bytes
+                    st.session_state['ret_zip_name'] = zip_name
+                    st.session_state['ret_count'] = len(df)
+                    st.session_state['ret_periodo'] = periodo
+                    st.session_state['ret_tipo_generado'] = tipo_ret
+
+                st.success("✓ .zip generado correctamente")
+                st.markdown(
+                    f'<div class="stats-row">'
+                    f'<div class="stat-chip"><div class="stat-val">{len(df)}</div><div class="stat-lbl">RET. {tipo_ret.upper()}</div></div>'
+                    f'<div class="stat-chip"><div class="stat-val">{periodo}</div><div class="stat-lbl">PERIODO</div></div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+            except ValueError as ve:
+                st.error(f"Error de validación: {ve}")
+            except Exception as e:
+                st.error(f"Error al procesar: {e}")
+                import traceback
+                st.code(traceback.format_exc())
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        if 'ret_zip_bytes' in st.session_state:
+            st.markdown('<div class="card"><div class="card-label">04 · Descargar</div>', unsafe_allow_html=True)
+            tipo_dl = st.session_state.get('ret_tipo_generado', tipo_ret)
+            st.download_button(
+                label=f"↓  .zip Retenciones {tipo_dl} ({st.session_state['ret_periodo']})",
+                data=st.session_state['ret_zip_bytes'],
+                file_name=st.session_state['ret_zip_name'],
+                mime="application/zip",
+                use_container_width=True,
+                key="dl_ret",
+            )
+            st.markdown('</div>', unsafe_allow_html=True)
+    else:
+        st.markdown(f"""
+        <div style="
+            text-align: center;
+            padding: 2rem 1rem;
+            font-family: 'Space Mono', monospace;
+            font-size: 0.72rem;
+            color: #6b7280;
+            letter-spacing: 0.12em;
+        ">
+            SUBÍ EL XLS · {tipo_ret.upper()}
         </div>
         """, unsafe_allow_html=True)
 
