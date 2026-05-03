@@ -524,6 +524,357 @@ if herramienta in (TOOL_MOVIMIENTOS, TOOL_PORTAL_IVA):
 **FC** = Factura · **NC** = Nota de Crédito · **ND** = Nota de Débito · **TF** = Tique Factura · **TK** = Tique · **RC** = Recibo (se trata como FC)
         """)
 
+# ─── Parser de Liquidaciones VISA Santander (PDF) ──────────────────────────────────
+# Estructura del PDF: bloques "FECHA DE PAGO DD/MM" con uno o más Liq. N°/Lote N°,
+# detalle de ventas y descuentos por línea (Arancel, Serv.Costos Financieros, Servicio
+# PAYWAY, Deduc.Impositivas) más una línea "Total del día" con monto presentado, total
+# descuentos y neto percibido. Al final del PDF: "DESGLOSE DE DESCUENTOS" con montos
+# consolidados (arancel por tipo, plan cuotas por modalidad, base imponible IVA,
+# deducciones impositivas, percep./retenc. AFIP-DGI).
+RE_SANT_BLOQUE_FECHA = re.compile(
+    r'FECHA DE PAGO\s+(\d{2}/\d{2})(.*?)(?=FECHA DE PAGO\s+\d{2}/\d{2}|SE ACREDITO EN|DESGLOSE DE DESCUENTOS|Fin de la informaci|\Z)',
+    re.DOTALL,
+)
+RE_SANT_FECHA_PRES = re.compile(r'Fecha de presentaci[oó]n\s+(\d{2}/\d{2})')
+RE_SANT_LIQ_LOTE = re.compile(r'Liq\.\s*N[°º]\s*(\d+)\s*-\s*Lote\s*N[°º]\s*(\d+)')
+RE_SANT_VENTA = re.compile(r'(\d+\s+Vent[as]+\s+[^\n$]+?)\$\s*([\d.]+,\d{2})')
+RE_SANT_TOTAL_DIA = re.compile(
+    r'Total del d[ií]a\s*\$?\s*([\d.]+,\d{2})\s*\$?\s*([\d.]+,\d{2})\s*\$?\s*([\d.]+,\d{2})',
+    re.DOTALL,
+)
+RE_SANT_DESC_LINE = re.compile(
+    r'(Arancel|Serv\.Costos Financieros|Servicio PAYWAY|Serv\.Cobro Anticipado|Deduc\.Impositivas)\s*\$\s*([\d.]+,\d{2})',
+    re.IGNORECASE,
+)
+RE_SANT_LINEA_MONTO = re.compile(r'^(.*?)\$\s*(-?[\d.]+,\d{2})\s*$')
+RE_SANT_TASA_LINE = re.compile(r'Tasa\s+([\d,]+\s*%)')
+RE_SANT_FECHA_EMI = re.compile(r'FECHA DE EMISION:\s*\d{2}/\d{2}/(\d{4})')
+
+_SANT_SECTION_HEADERS = {
+    "arancel": re.compile(r'^\s*Arancel\s*$', re.IGNORECASE),
+    "scf": re.compile(r'^\s*Servicio Costos Financieros\s*$', re.IGNORECASE),
+    "payway": re.compile(r'^\s*Servicio\s+PAYWAY\b', re.IGNORECASE),
+    "base_iva": re.compile(r'^\s*Base Imponible IVA\b', re.IGNORECASE),
+    "deduc": re.compile(r'^\s*Deducciones Impositivas\s*$', re.IGNORECASE),
+    "afip": re.compile(r'^\s*Percep\.\/?\s*Retenc\.\s*AFIP', re.IGNORECASE),
+    "ecommerce": re.compile(r'^\s*Serv\.\s*Ecommerce\s*$', re.IGNORECASE),
+}
+
+
+def _sant_parse_monto(s: str) -> float:
+    return float(s.strip().replace(".", "").replace(",", "."))
+
+
+def _sant_parsear_desglose(texto: str) -> dict:
+    """Parsea la sección DESGLOSE DE DESCUENTOS (o Serv.Ecommerce en PDFs vacíos)
+    con un state machine que tolera labels multi-línea y headers mezclados."""
+    res = {
+        "arancel": [],
+        "serv_costos_financieros": [],
+        "servicio_payway": [],
+        "base_imp_iva": None,
+        "deducciones_impositivas": [],
+        "afip_dgi": None,
+    }
+    m = re.search(
+        r'DESGLOSE DE DESCUENTOS(.*?)(?:Fin de la informaci|Constancia Mensual|SR\. COMERCIANTE|\Z)',
+        texto, re.DOTALL,
+    )
+    cuerpo = m.group(1) if m else ""
+
+    if not cuerpo:
+        m_eco = re.search(
+            r'(Serv\.\s*Ecommerce.*?)(?:SR\. COMERCIANTE|Fin de la informaci|\Z)',
+            texto, re.DOTALL,
+        )
+        cuerpo = m_eco.group(1) if m_eco else ""
+        if cuerpo:
+            etiqueta_buffer = []
+            for raw in cuerpo.split("\n"):
+                line = raw.strip()
+                if not line or _SANT_SECTION_HEADERS["ecommerce"].match(line):
+                    continue
+                m_l = RE_SANT_LINEA_MONTO.match(line)
+                if m_l:
+                    label = " ".join([*etiqueta_buffer, m_l.group(1).strip()]).strip() or "Cargo por Servicio"
+                    res["servicio_payway"].append((label, _sant_parse_monto(m_l.group(2))))
+                    etiqueta_buffer = []
+                else:
+                    etiqueta_buffer.append(line)
+        return res
+
+    state = None
+    sub_label = ""
+    etiqueta_buffer = []
+    base_iva_tasa = None
+
+    for raw in cuerpo.split("\n"):
+        line = raw.strip()
+        if not line:
+            continue
+
+        cambio = None
+        for sec, rx in _SANT_SECTION_HEADERS.items():
+            if rx.match(line):
+                cambio = sec
+                break
+        if cambio:
+            state = cambio
+            sub_label = ""
+            etiqueta_buffer = []
+            if cambio == "afip":
+                m_l = RE_SANT_LINEA_MONTO.match(line)
+                if m_l:
+                    res["afip_dgi"] = (
+                        "Percep./Retenc. AFIP-DGI (RG 796)",
+                        _sant_parse_monto(m_l.group(2)),
+                    )
+            continue
+
+        # SCF subcategoría: PyPDF2 a veces colapsa subcategoría + primera entrada
+        # ("-Plan Cuotas       10 Ventas en  3 cuotas $ 534.808,00") en una sola línea.
+        if state == "scf" and line.startswith("-"):
+            m_l = RE_SANT_LINEA_MONTO.match(line)
+            if m_l:
+                rest = m_l.group(1).lstrip("- ").strip()
+                sm = re.match(r'(.+?)\s{2,}(\d+\s+Vent[as]+.*)', rest) \
+                    or re.match(r'(.+?)\s+(\d+\s+Vent[as]+.*)', rest)
+                if sm:
+                    sub_label = sm.group(1).strip()
+                    full = f"{sub_label} - {sm.group(2).strip()}"
+                else:
+                    sub_label = rest
+                    full = rest
+                res["serv_costos_financieros"].append((full, _sant_parse_monto(m_l.group(2))))
+                etiqueta_buffer = []
+            else:
+                sub_label = line.lstrip("- ").strip()
+                etiqueta_buffer = []
+            continue
+
+        if state == "base_iva":
+            t = RE_SANT_TASA_LINE.search(line)
+            if t:
+                base_iva_tasa = t.group(1).strip()
+                m_l = RE_SANT_LINEA_MONTO.match(line)
+                if m_l:
+                    res["base_imp_iva"] = (
+                        f"Tasa {base_iva_tasa} (Monto Gravado)",
+                        _sant_parse_monto(m_l.group(2)),
+                    )
+                continue
+            m_l = RE_SANT_LINEA_MONTO.match(line)
+            if m_l and base_iva_tasa:
+                res["base_imp_iva"] = (
+                    f"Tasa {base_iva_tasa} (Monto Gravado)",
+                    _sant_parse_monto(m_l.group(2)),
+                )
+                continue
+
+        m_l = RE_SANT_LINEA_MONTO.match(line)
+        if m_l:
+            label = " ".join([*etiqueta_buffer, m_l.group(1).strip()]).strip()
+            monto = _sant_parse_monto(m_l.group(2))
+            if state == "arancel":
+                lbl = re.sub(r'^Arancel\s+', '', label).strip() or label
+                res["arancel"].append((lbl, monto))
+            elif state == "scf":
+                lbl = f"{sub_label} - {label}" if sub_label else label
+                res["serv_costos_financieros"].append((lbl, monto))
+            elif state == "payway":
+                res["servicio_payway"].append((label or "Cargo por Servicio", monto))
+            elif state == "deduc":
+                res["deducciones_impositivas"].append((label, monto))
+            elif state == "afip":
+                res["afip_dgi"] = ("Percep./Retenc. AFIP-DGI (RG 796)", monto)
+            etiqueta_buffer = []
+        else:
+            etiqueta_buffer.append(line)
+
+    return res
+
+
+def _sant_extract_rate(label: str) -> tuple:
+    """Extrae la tasa numérica de un label como 'IVA  21,00 %' → (0.21, '21,00')."""
+    m = re.search(r'(\d+(?:,\d+)?)\s*%', label)
+    if not m:
+        return (0.0, "")
+    rate_str = m.group(1)
+    return (float(rate_str.replace(",", ".")) / 100, rate_str)
+
+
+def _sant_parsear_constancia(texto: str) -> list:
+    """Parsea la Constancia RG 796 - Percepción IVA (Reg.493) al final del PDF.
+    Devuelve lista de dicts {fecha_pago, liq, importe}; vacío si no hay constancia."""
+    m = re.search(
+        r'Constancia Mensual.*?(?=Fin de la informaci|\Z)',
+        texto, re.DOTALL,
+    )
+    if not m:
+        return []
+    body = m.group(0)
+    items = []
+    for fecha, liq, imp in re.findall(
+        r'(\d{2}/\d{2}/\d{4})\s+(\d+)\s+\$\s*([\d.]+,\d{2})',
+        body,
+    ):
+        items.append({
+            "fecha_pago": fecha,
+            "liq": liq,
+            "importe": _sant_parse_monto(imp),
+        })
+    return items
+
+
+def parsear_pdf_santander(texto: str) -> dict:
+    """Parsea un PDF de liquidación VISA Santander. Devuelve dict con `liquidaciones`
+    (una fila por FECHA DE PAGO con IVA/Perc.IB/SIRTAC calculados con las alícuotas
+    del desglose), `desglose` (totales del periodo) y `meta` (razón social, periodo,
+    nro de resumen, etiquetas de tasas)."""
+    desglose = _sant_parsear_desglose(texto)
+
+    # Alícuotas: leer del desglose; si no aparecen, usar defaults razonables.
+    tasa_iva, lbl_iva = 0.21, "21,00"
+    tasa_perc_ib, lbl_perc_ib = 0.04, "4,00"
+    tasa_sirtac, lbl_sirtac = 0.015, "1,50"
+    for label, _ in desglose.get("deducciones_impositivas", []):
+        rate, rate_str = _sant_extract_rate(label)
+        if rate <= 0:
+            continue
+        up = label.upper()
+        if "SIRTAC" in up:
+            tasa_sirtac, lbl_sirtac = rate, rate_str
+        elif "BUENOS AIRES" in up or "PERC. IB" in up or "PERC IB" in up:
+            tasa_perc_ib, lbl_perc_ib = rate, rate_str
+        elif "IVA" in up and "PERC" not in up:
+            tasa_iva, lbl_iva = rate, rate_str
+
+    # Año del periodo: priorizar la FECHA DE EMISION (encabezado), no la primera línea
+    fecha_emi_match = re.search(
+        r'FECHA DE EMISION:\s*\n.*?(\d{2})/(\d{2})/(\d{4})',
+        texto, re.DOTALL,
+    )
+    año = fecha_emi_match.group(3) if fecha_emi_match else "2025"
+
+    # Constancia RG 796 → AFIP-DGI por fecha de pago.  La Constancia lista cada
+    # percepción IVA (RG 2408 Reg.493) con su Liq. N° y fecha. Sumamos por fecha
+    # para asignar a cada bloque "FECHA DE PAGO" del cuerpo.
+    constancia = _sant_parsear_constancia(texto)
+    afip_por_fecha = {}
+    for it in constancia:
+        afip_por_fecha[it["fecha_pago"]] = afip_por_fecha.get(it["fecha_pago"], 0.0) + it["importe"]
+
+    liquidaciones = []
+    for m in RE_SANT_BLOQUE_FECHA.finditer(texto):
+        fecha_pago_dm = m.group(1)
+        cuerpo = m.group(2)
+
+        fecha_pres_match = RE_SANT_FECHA_PRES.search(cuerpo)
+        fecha_pres_dm = fecha_pres_match.group(1) if fecha_pres_match else ""
+
+        liqs = RE_SANT_LIQ_LOTE.findall(cuerpo)
+        ventas = RE_SANT_VENTA.findall(cuerpo)
+
+        total_match = RE_SANT_TOTAL_DIA.search(cuerpo)
+        if total_match:
+            monto_pres = _sant_parse_monto(total_match.group(1))
+            neto = _sant_parse_monto(total_match.group(3))
+        else:
+            monto_pres = sum(_sant_parse_monto(v[1]) for v in ventas)
+            neto = 0.0
+
+        arancel = scf = payway = deduc_imp = 0.0
+        for label, monto_s in RE_SANT_DESC_LINE.findall(cuerpo):
+            monto = _sant_parse_monto(monto_s)
+            lbl_l = label.lower()
+            if "arancel" in lbl_l:
+                arancel += monto
+            elif "deduc" in lbl_l:
+                deduc_imp += monto
+            elif "payway" in lbl_l:
+                payway += monto
+            else:
+                scf += monto  # Costos Financieros + Cobro Anticipado
+
+        # Impuestos por liquidación. IVA y SIRTAC se calculan con fórmula (sus
+        # bases son inequívocas). Perc.IB se calcula por **residuo** sobre la línea
+        # Deduc.Impositivas del PDF para que el resultado refleje exactamente lo
+        # que el banco descontó (correctamente 0 en días puro Tj.Débito, etc.). Si
+        # no hay Constancia (no podemos extraer AFIP), fallback a fórmula directa.
+        fecha_pago_full = f"{fecha_pago_dm}/{año}"
+        base_aplicable = arancel + scf + payway
+        iva = round(base_aplicable * tasa_iva, 2)
+        sirtac = round(monto_pres * tasa_sirtac, 2)
+        afip_dgi = afip_por_fecha.get(fecha_pago_full, 0.0)
+        if afip_por_fecha:
+            perc_ib = round(deduc_imp - iva - sirtac - afip_dgi, 2)
+            if perc_ib < 0:
+                perc_ib = 0.0  # safety: redondeos / ediciones del banco
+        else:
+            perc_ib = round(base_aplicable * tasa_perc_ib, 2)
+
+        if liqs:
+            por_liq = {}
+            for liq, lote in liqs:
+                por_liq.setdefault(liq, []).append(lote)
+            liq_str = ", ".join(f"{liq}/L{'+'.join(lotes)}" for liq, lotes in por_liq.items())
+        else:
+            liq_str = ""
+
+        detalle = " + ".join(re.sub(r'\s+', ' ', v[0]).strip() for v in ventas) if ventas else ""
+
+        liquidaciones.append({
+            "Fecha Pago": fecha_pago_full,
+            "Fecha Pres.": f"{fecha_pres_dm}/{año}" if fecha_pres_dm else "",
+            "Liquidaciones": liq_str,
+            "Detalle": detalle,
+            "Monto Presentado": monto_pres,
+            "Arancel": arancel,
+            "Serv. Costos Financieros": scf,
+            "Servicio PAYWAY": payway,
+            "IVA": iva,
+            "Perc.IB": perc_ib,
+            "SIRTAC": sirtac,
+            "AFIP-DGI": afip_dgi,
+            "Neto Percibido": neto,
+        })
+
+    # ─── Metadata desde el encabezado ───────────────────────────────────────
+    fecha_emision = ""
+    periodo = ""
+    nro_resumen = ""
+    if fecha_emi_match:
+        dd, mm, yyyy = fecha_emi_match.group(1), fecha_emi_match.group(2), fecha_emi_match.group(3)
+        fecha_emision = f"{dd}/{mm}/{yyyy}"
+        periodo = f"{mm}/{yyyy}"
+        # Nro de resumen: primer número largo (≥8 dígitos) después de la fecha de emisión
+        m_nro = re.search(
+            r'\n\s*(\d{8,})',
+            texto[fecha_emi_match.end():fecha_emi_match.end() + 200],
+        )
+        if m_nro:
+            nro_resumen = m_nro.group(1)
+
+    # Razón Social: sigue al label "Razón Social" en línea separada y precede a "Establecimiento"
+    razon_match = re.search(
+        r'Raz[óo]n Social\s*\n\s*([^\n]+?)\s*\n\s*Establecimiento',
+        texto,
+    )
+    razon_social = razon_match.group(1).strip() if razon_match else ""
+
+    meta = {
+        "nro_resumen": nro_resumen,
+        "razon_social": razon_social,
+        "periodo": periodo,
+        "fecha_emision": fecha_emision,
+        "tasa_iva_label": lbl_iva,
+        "tasa_perc_ib_label": lbl_perc_ib,
+        "tasa_sirtac_label": lbl_sirtac,
+    }
+
+    return {"liquidaciones": liquidaciones, "desglose": desglose, "meta": meta}
+
+
 if herramienta == TOOL_MOVIMIENTOS:
         # ─── Card 01: Archivo ──────────────────────────────────────────────────────────
         st.markdown('<div class="card"><div class="card-label">01 · Archivo fuente</div>', unsafe_allow_html=True)
@@ -1628,11 +1979,42 @@ elif herramienta == TOOL_LIQUIDACIONES:
         label_visibility="visible",
         key="liquidaciones_pdf"
     )
+    formato_pdf = st.radio(
+        "Formato del PDF",
+        options=["Fiserv / First Data", "Santander"],
+        index=0,
+        horizontal=True,
+        key="liq_formato_pdf",
+        help="Fiserv: tabular con columnas $. Santander: bloques 'FECHA DE PAGO' con desglose final.",
+    )
     st.markdown('</div>', unsafe_allow_html=True)
 
     if uploaded_liq:
         liq_filename = Path(uploaded_liq.name).stem
         st.success(f"**{uploaded_liq.name}** listo para procesar")
+
+        # ─── Auto-fill desde el encabezado del PDF (sólo Santander) ───────────────
+        # Si el archivo cambió, parseamos metadata y pre-cargamos los inputs vía
+        # session_state. El usuario puede sobrescribir manualmente — no volvemos a
+        # auto-fill en ese caso (porque el file_id ya se registró).
+        sant_meta = {}
+        if formato_pdf == "Santander":
+            file_id = f"{uploaded_liq.name}|{uploaded_liq.size}"
+            if st.session_state.get("liq_sant_last_file_id") != file_id:
+                try:
+                    _rd = PyPDF2.PdfReader(io.BytesIO(uploaded_liq.getvalue()))
+                    _txt = "".join(p.extract_text() + "\n" for p in _rd.pages)
+                    sant_meta = parsear_pdf_santander(_txt)["meta"]
+                    st.session_state["liq_sant_meta"] = sant_meta
+                    st.session_state["liq_sant_last_file_id"] = file_id
+                    if sant_meta.get("razon_social"):
+                        st.session_state["liq_contribuyente"] = sant_meta["razon_social"]
+                    if sant_meta.get("periodo"):
+                        st.session_state["liq_periodo"] = sant_meta["periodo"]
+                except Exception:
+                    sant_meta = {}
+            else:
+                sant_meta = st.session_state.get("liq_sant_meta", {})
 
         # ─── Card 02: Datos del contribuyente ──────────────────────────────────────
         st.markdown('<div class="card"><div class="card-label">02 · Datos del contribuyente</div>', unsafe_allow_html=True)
@@ -1645,16 +2027,27 @@ elif herramienta == TOOL_LIQUIDACIONES:
                 key="liq_contribuyente"
             )
         with col_b:
-            tipo_tarjeta = st.selectbox(
-                "Tipo de tarjeta / Entidad",
-                options=["Visa Crédito", "Visa Débito", "Mastercard Crédito", "Mastercard Débito",
-                         "American Express Crédito", "American Express Débito",
-                         "Maestro Crédito", "Maestro Débito",
-                         "Cabal Crédito", "Cabal Débito", "Naranja",
-                         "First Data", "Otra"],
-                index=0,
-                key="liq_tarjeta"
-            )
+            if formato_pdf == "Santander":
+                # Santander emite un único resumen consolidado por tarjeta —
+                # no se subdivide en Crédito/Débito.
+                tipo_tarjeta = st.selectbox(
+                    "Tipo de tarjeta / Entidad",
+                    options=["Visa", "Mastercard", "American Express", "Maestro",
+                             "Cabal", "Naranja", "First Data", "Otra"],
+                    index=0,
+                    key="liq_tarjeta_santander",
+                )
+            else:
+                tipo_tarjeta = st.selectbox(
+                    "Tipo de tarjeta / Entidad",
+                    options=["Visa Crédito", "Visa Débito", "Mastercard Crédito", "Mastercard Débito",
+                             "American Express Crédito", "American Express Débito",
+                             "Maestro Crédito", "Maestro Débito",
+                             "Cabal Crédito", "Cabal Débito", "Naranja",
+                             "First Data", "Otra"],
+                    index=0,
+                    key="liq_tarjeta",
+                )
         # Si selecciona "Otra", mostrar text input
         if tipo_tarjeta == "Otra":
             tipo_tarjeta_custom = st.text_input(
@@ -1688,6 +2081,251 @@ elif herramienta == TOOL_LIQUIDACIONES:
                 st.warning("Ingresá el nombre del contribuyente antes de procesar.")
             elif not periodo_liq.strip():
                 st.warning("Ingresá el periodo (MM/AAAA) antes de procesar.")
+            elif formato_pdf == "Santander":
+                # ─── Rama Santander ──────────────────────────────────────────────
+                try:
+                    periodo_parts = periodo_liq.strip().split("/")
+                    if len(periodo_parts) == 2:
+                        mes_liq = periodo_parts[0].zfill(2)
+                        anio_liq = periodo_parts[1]
+                        periodo_codigo = anio_liq[2:] + mes_liq
+                    else:
+                        periodo_codigo = "2501"
+
+                    with st.spinner("Leyendo PDF..."):
+                        reader = PyPDF2.PdfReader(io.BytesIO(uploaded_liq.getvalue()))
+                        texto = "".join(p.extract_text() + "\n" for p in reader.pages)
+
+                    with st.spinner("Extrayendo liquidaciones VISA Santander..."):
+                        out = parsear_pdf_santander(texto)
+
+                    if not out["liquidaciones"]:
+                        st.error("No se encontraron bloques 'FECHA DE PAGO' en el PDF. Verificá que sea un resumen mensual VISA Santander.")
+                    else:
+                        meta = out["meta"]
+                        # Etiquetas dinámicas con la alícuota leída del desglose
+                        col_iva = f"IVA {meta['tasa_iva_label']} %"
+                        col_perc_ib = f"Perc. IB {meta['tasa_perc_ib_label']} %"
+                        col_sirtac = f"Ret. IB SIRTAC {meta['tasa_sirtac_label']} %"
+
+                        df_liq = pd.DataFrame(out["liquidaciones"]).rename(columns={
+                            "IVA": col_iva,
+                            "Perc.IB": col_perc_ib,
+                            "SIRTAC": col_sirtac,
+                        })[[
+                            "Fecha Pago", "Fecha Pres.", "Liquidaciones", "Detalle",
+                            "Monto Presentado", "Arancel", "Serv. Costos Financieros",
+                            "Servicio PAYWAY", col_iva, col_perc_ib, col_sirtac,
+                            "AFIP-DGI", "Neto Percibido",
+                        ]]
+
+                        # Encabezado: usar Nro de Resumen del PDF (más identificativo que la primera liq)
+                        nro_resumen_clean = (meta.get("nro_resumen") or "").lstrip("0") or "0"
+                        encabezado_fc = f"FC {periodo_codigo}-{nro_resumen_clean}/A"
+                        banco = "BANCO SANTANDER RIO S.A."
+
+                        with st.spinner("Generando Excel..."):
+                            output = io.BytesIO()
+                            money_fmt = '_($* #,##0.00_);_($* (#,##0.00);_($* "-"??_);_(@_)'
+                            header_fill = PatternFill('solid', fgColor='2E7D32')
+                            zebra_fill = PatternFill('solid', fgColor='C8E6C9')
+                            base_iva_fill = PatternFill('solid', fgColor='E3F2FD')
+                            header_font_white = Font(bold=True, size=11, color='FFFFFF')
+                            center_align = Alignment(horizontal='center', vertical='center')
+                            thick_side = Side(border_style='thick', color='000000')
+                            no_side = Side(border_style=None)
+
+                            def _santander_encabezado(ws):
+                                ws.sheet_view.showGridLines = False
+                                ws.insert_cols(1)
+                                ws.column_dimensions['A'].width = 4
+                                ws.insert_rows(1)
+                                ws.insert_rows(2, 6)
+                                merge_end = "E"
+                                cabecera = [
+                                    (2, f"LIQUIDACION DE TARJETA: {tipo_tarjeta_final.upper()} SANTANDER", Font(bold=True, size=14, color='FFFFFF'), header_fill),
+                                    (3, nombre_contribuyente.upper(), Font(bold=True, size=11, color='2E7D32'), None),
+                                    (4, encabezado_fc, Font(bold=True, size=11, color='2E7D32'), None),
+                                    (5, banco, Font(italic=True, size=10, color='388E3C'), None),
+                                    (6, f"PERIODO: {periodo_liq.strip()}", Font(italic=True, size=10, color='388E3C'), None),
+                                ]
+                                for r, val, font, fill in cabecera:
+                                    ws.merge_cells(f'B{r}:{merge_end}{r}')
+                                    cell = ws[f'B{r}']
+                                    cell.value = val
+                                    cell.font = font
+                                    if fill:
+                                        cell.fill = fill
+                                    cell.alignment = center_align
+                                for row_i in range(2, 7):
+                                    for col_i in range(2, 6):
+                                        c = ws.cell(row=row_i, column=col_i)
+                                        t = thick_side if row_i == 2 else no_side
+                                        b = thick_side if row_i == 6 else no_side
+                                        l = thick_side if col_i == 2 else no_side
+                                        r_ = thick_side if col_i == 5 else no_side
+                                        c.border = Border(top=t, bottom=b, left=l, right=r_)
+
+                            def formatear_hoja_liq_sant(ws, df):
+                                _santander_encabezado(ws)
+                                first_data_col = 2
+                                last_data_col = len(df.columns) + 1
+                                data_header_row = 8
+                                data_start_row = 9
+                                last_data_row = data_start_row + len(df) - 1
+                                total_row = last_data_row + 1
+                                for col_idx in range(first_data_col, last_data_col + 1):
+                                    cell = ws.cell(row=data_header_row, column=col_idx)
+                                    cell.font = header_font_white
+                                    cell.fill = header_fill
+                                    cell.alignment = center_align
+                                text_cols = {2, 3, 4, 5}
+                                for row_idx in range(data_start_row, last_data_row + 1):
+                                    for col_idx in range(first_data_col, last_data_col + 1):
+                                        cell = ws.cell(row=row_idx, column=col_idx)
+                                        cell.alignment = center_align
+                                        if col_idx not in text_cols and isinstance(cell.value, (int, float)):
+                                            cell.number_format = money_fmt
+                                    if (row_idx - data_start_row) % 2 == 0:
+                                        for col_idx in range(first_data_col, last_data_col + 1):
+                                            ws.cell(row=row_idx, column=col_idx).fill = zebra_fill
+                                ws.merge_cells(f'B{total_row}:E{total_row}')
+                                ws[f'B{total_row}'] = "TOTAL"
+                                ws[f'B{total_row}'].font = Font(bold=True, size=11, color='FFFFFF')
+                                ws[f'B{total_row}'].fill = header_fill
+                                ws[f'B{total_row}'].alignment = center_align
+                                for col_idx in range(3, 6):
+                                    ws.cell(row=total_row, column=col_idx).fill = header_fill
+                                for col_idx in range(6, last_data_col + 1):
+                                    cell = ws.cell(row=total_row, column=col_idx)
+                                    col_letter = get_column_letter(col_idx)
+                                    cell.value = f"=SUM({col_letter}{data_start_row}:{col_letter}{last_data_row})"
+                                    cell.number_format = money_fmt
+                                    cell.font = Font(bold=True, size=10, color='FFFFFF')
+                                    cell.fill = header_fill
+                                    cell.alignment = center_align
+                                for row_i in range(data_header_row, total_row + 1):
+                                    is_special = row_i in (data_header_row, total_row)
+                                    for col_i in range(first_data_col, last_data_col + 1):
+                                        cell = ws.cell(row=row_i, column=col_i)
+                                        t = thick_side if row_i == data_header_row else (thick_side if row_i == total_row else no_side)
+                                        b = thick_side if row_i == total_row else (thick_side if row_i == data_header_row else no_side)
+                                        l = thick_side if (col_i == first_data_col or is_special) else no_side
+                                        r_ = thick_side if (col_i == last_data_col or is_special) else no_side
+                                        cell.border = Border(top=t, bottom=b, left=l, right=r_)
+                                for col_idx in range(first_data_col, last_data_col + 1):
+                                    col_letter = get_column_letter(col_idx)
+                                    max_len = max(
+                                        len(str(ws.cell(row=r, column=col_idx).value or ''))
+                                        for r in range(data_header_row, min(total_row + 1, data_header_row + 50))
+                                    )
+                                    ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
+                                ws.column_dimensions['E'].width = max(ws.column_dimensions['E'].width, 38)
+                                # ─── Resumen Impositivo (referencia las celdas de la fila TOTAL) ──
+                                # NETO 21 = Arancel + SCF + PAYWAY (suma de las 3 columnas, fila TOTAL).
+                                # IVA / Perc.IB / SIRTAC / AFIP-DGI = celdas TOTAL de cada columna.
+                                df_cols = list(df.columns)
+                                idx_arancel = df_cols.index("Arancel") + first_data_col
+                                idx_scf = df_cols.index("Serv. Costos Financieros") + first_data_col
+                                idx_payway = df_cols.index("Servicio PAYWAY") + first_data_col
+                                idx_iva = next((i + first_data_col for i, c in enumerate(df_cols) if c.startswith("IVA ")), None)
+                                idx_pib = next((i + first_data_col for i, c in enumerate(df_cols) if c.startswith("Perc. IB ")), None)
+                                idx_sir = next((i + first_data_col for i, c in enumerate(df_cols) if "SIRTAC" in c), None)
+                                idx_afip = (df_cols.index("AFIP-DGI") + first_data_col) if "AFIP-DGI" in df_cols else None
+                                resumen = [(
+                                    "NETO 21",
+                                    f"={get_column_letter(idx_arancel)}{total_row}+{get_column_letter(idx_scf)}{total_row}+{get_column_letter(idx_payway)}{total_row}",
+                                )]
+                                if idx_iva:
+                                    resumen.append(("IVA 21", f"={get_column_letter(idx_iva)}{total_row}"))
+                                if idx_pib:
+                                    resumen.append(("PERC. IB BS AS", f"={get_column_letter(idx_pib)}{total_row}"))
+                                if idx_sir:
+                                    resumen.append(("SIRTAC", f"={get_column_letter(idx_sir)}{total_row}"))
+                                if idx_afip:
+                                    resumen.append(("PERC. AFIP-DGI", f"={get_column_letter(idx_afip)}{total_row}"))
+                                rs = total_row + 2
+                                ws.merge_cells(f'B{rs}:D{rs}')
+                                ws[f'B{rs}'] = "RESUMEN IMPOSITIVO"
+                                ws[f'B{rs}'].font = Font(bold=True, size=11, color='FFFFFF')
+                                ws[f'B{rs}'].fill = header_fill
+                                ws[f'B{rs}'].alignment = center_align
+                                for idx, (concepto, formula) in enumerate(resumen):
+                                    r = rs + 1 + idx
+                                    ws.merge_cells(f'B{r}:C{r}')
+                                    ws[f'B{r}'] = concepto
+                                    ws[f'B{r}'].font = Font(bold=True, size=10)
+                                    ws[f'B{r}'].alignment = center_align
+                                    cv = ws.cell(row=r, column=4)
+                                    cv.value = formula
+                                    cv.number_format = money_fmt
+                                    cv.alignment = center_align
+                                    if idx % 2 == 0:
+                                        ws[f'B{r}'].fill = zebra_fill
+                                        ws.cell(row=r, column=3).fill = zebra_fill
+                                        cv.fill = zebra_fill
+                                rt = rs + 1 + len(resumen)
+                                ws.merge_cells(f'B{rt}:C{rt}')
+                                ws[f'B{rt}'] = "TOTAL"
+                                ws[f'B{rt}'].font = Font(bold=True, size=11, color='FFFFFF')
+                                ws[f'B{rt}'].fill = header_fill
+                                ws[f'B{rt}'].alignment = center_align
+                                ws.cell(row=rt, column=3).fill = header_fill
+                                ct = ws.cell(row=rt, column=4)
+                                # TOTAL del resumen = IVA + Perc.IB + SIRTAC + AFIP (suma desde el segundo item, NETO 21 es base imponible).
+                                ct.value = f"=SUM(D{rs+2}:D{rt-1})"
+                                ct.number_format = money_fmt
+                                ct.font = Font(bold=True, size=10, color='FFFFFF')
+                                ct.fill = header_fill
+                                ct.alignment = center_align
+                                for row_i in range(rs, rt + 1):
+                                    for col_i in range(2, 5):
+                                        c = ws.cell(row=row_i, column=col_i)
+                                        t = thick_side if row_i == rs else no_side
+                                        b = thick_side if row_i == rt else no_side
+                                        l = thick_side if col_i == 2 else no_side
+                                        r_ = thick_side if col_i == 4 else no_side
+                                        c.border = Border(top=t, bottom=b, left=l, right=r_)
+
+                            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                                df_liq.to_excel(writer, sheet_name="Liquidaciones", index=False)
+                                wb = writer.book
+                                formatear_hoja_liq_sant(wb["Liquidaciones"], df_liq)
+
+                            output.seek(0)
+
+                        st.success(f"✓  {len(df_liq)} fechas de pago procesadas (formato Santander)")
+                        n_constancia = sum(1 for v in (out.get("liquidaciones") or []) if v.get("AFIP-DGI", 0) > 0)
+                        st.markdown(f"""
+                        <div class="stats-row">
+                            <div class="stat-chip">
+                                <span class="stat-val">{len(df_liq)}</span>
+                                <span class="stat-lbl">Fechas de Pago</span>
+                            </div>
+                            <div class="stat-chip">
+                                <span class="stat-val">{n_constancia}</span>
+                                <span class="stat-lbl">Con Perc. AFIP</span>
+                            </div>
+                            <div class="stat-chip">
+                                <span class="stat-val">{len(reader.pages)}</span>
+                                <span class="stat-lbl">Páginas PDF</span>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        st.info(
+                            f"**{nombre_contribuyente}** · {tipo_tarjeta_final} Santander · "
+                            f"**{encabezado_fc}** · {banco}"
+                        )
+                        st.download_button(
+                            label="↓  Descargar Excel de Liquidaciones",
+                            data=output,
+                            file_name=f"{liq_filename}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True,
+                        )
+                except Exception as e:
+                    st.error(f"Error al procesar el archivo: {str(e)}")
+                    st.exception(e)
             else:
                 try:
                     # Parsear periodo para el encabezado (MM/AAAA -> AAMM)

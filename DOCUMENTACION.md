@@ -694,11 +694,16 @@ Herramienta bifuncional para la generación de archivos para la Agencia de Recau
 - **Control Ulterior:** Se requiere configuración explícita de `Quincena`, `Cod. Actividad` y `Nro Lote`.
 - **Empaquetado:** Archivo puro sin hash, acatando el estándar prefijado: `ER-CUIT-AAAAMMQ-ACTIVIDAD-LOTEXXXXX.ZIP`.
 
-#### 5. Liquidaciones Tarjeta FISERV (.pdf)
+#### 5. Liquidaciones Tarjeta (.pdf) — Fiserv / Santander
 
-[app.py:L1123-L1681](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L1123-L1681)
+[app.py:L1865-L2330](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L1865-L2330)
 
-**La herramienta más autónoma**, no usa `extractor_movimientos.py`. Parsea liquidaciones de tarjeta de crédito/débito en formato PDF de FISERV/First Data.
+**La herramienta más autónoma**, no usa `extractor_movimientos.py`. Parsea liquidaciones de tarjeta en formato PDF de **dos emisores distintos**: FISERV/First Data y Santander.
+
+**Selector de formato** ([app.py:L1982-L1989](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L1982-L1989)):
+La UI tiene un radio (después del file_uploader, antes de los inputs) `Formato del PDF: Fiserv / First Data | Santander`. Bifurca el flujo dentro del `if btn_procesar:` — Fiserv usa el código original, Santander usa el parser nuevo.
+
+##### 5.A Formato Fiserv / First Data
 
 **Parser de PDF:**
 1. Extrae texto con PyPDF2
@@ -708,11 +713,111 @@ Herramienta bifuncional para la generación de archivos para la Agencia de Recau
 5. Separa en 3 DataFrames: Liquidaciones, QR, Ajustes
 
 **Excel generado:**
-- Tema **verde** (diferente al tema azul del resto)
-- Encabezado con tipo de tarjeta, contribuyente, comprobante y periodo
+- Tema **verde**, encabezado con tipo de tarjeta + contribuyente + comprobante + periodo
 - 3 hojas: Liquidaciones, QR, AJUSTE
 - **Resumen Impositivo** automático: calcula IVA 21%, IVA 10.5%, PERC IVA, SIRTAC, PERC IIBB con fórmulas inversas (Neto = IVA / 0.21)
 - Highlight amarillo/naranja para CARGO TERMINAL y ACREDITACIONES PAGO QRD
+- Selectbox de tarjeta con variantes Crédito/Débito (`Visa Crédito`, `Visa Débito`, `Mastercard Crédito`, ...)
+
+##### 5.B Formato Santander (Resumen Mensual de Liquidaciones)
+
+PDFs como `comprobante-MEN-COMxxxxxxxxxx-AAAA-MM-DD.pdf` emitidos por **Banco Santander Río** para tarjetas Visa/Mastercard/etc. Estructura completamente distinta a Fiserv: texto narrativo agrupado por bloques `FECHA DE PAGO DD/MM`, con un único `Deduc.Impositivas` lump-sum por día y un **DESGLOSE DE DESCUENTOS** consolidado al final del PDF.
+
+###### Parser ([app.py:L534-L795](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L534-L795))
+
+Tres funciones a nivel módulo:
+
+| Función | Línea | Rol |
+|---|---|---|
+| `_sant_parsear_desglose(texto)` | L568-L750 | State-machine que parsea la sección `DESGLOSE DE DESCUENTOS` (arancel por tipo, plan cuotas por modalidad, base imponible IVA, deducciones, AFIP-DGI). Tolera labels multi-línea y subcategorías colapsadas con su monto en la misma línea. |
+| `_sant_parsear_constancia(texto)` | L587-L606 | Parsea la **Constancia RG 796** (Percepción IVA RG 2408 - Reg.493) al final del PDF. Devuelve lista de `{fecha_pago, liq, importe}` para cada percepción AFIP. |
+| `parsear_pdf_santander(texto)` | L796-L895 | Función principal. Devuelve `{liquidaciones, desglose, meta}`. |
+
+**Regex constants** ([app.py:L534-L562](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L534-L562)):
+
+| Regex | Captura |
+|---|---|
+| `RE_SANT_BLOQUE_FECHA` | Bloques `FECHA DE PAGO DD/MM ... (hasta el siguiente bloque o fin)` |
+| `RE_SANT_FECHA_PRES` | `Fecha de presentación DD/MM` dentro del bloque |
+| `RE_SANT_LIQ_LOTE` | `Liq. N° NNNN - Lote N° NNNN` (varios por bloque) |
+| `RE_SANT_VENTA` | `N Ventas/Venta ... $ X.XXX,XX` (renglones de ventas) |
+| `RE_SANT_TOTAL_DIA` | `Total del día $ Pres $ Desc $ Neto` |
+| `RE_SANT_DESC_LINE` | `Arancel\|Serv.Costos Financieros\|Servicio PAYWAY\|Serv.Cobro Anticipado\|Deduc.Impositivas $ X` |
+| `_SANT_SECTION_HEADERS` | Dict de regex para detectar secciones del desglose (Arancel / SCF / PAYWAY / Base IVA / Deducciones / AFIP / Ecommerce) |
+
+**Granularidad: una fila por FECHA DE PAGO**, con múltiples Liq.N°/Lote concatenados (ej. `00256202/L0748+0749, 00256203/L0748`).
+
+###### Cálculo de impuestos por liquidación ([app.py:L843-L863](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L843-L863))
+
+Las **alícuotas se extraen dinámicamente** del Desglose final del PDF (`IVA 21,00 %`, `Perc.IB BUENOS AIRES 4,00 %`, `Ret.IB SIRTAC 1,50 %`) — pueden variar por comercio/jurisdicción. Por cada FECHA DE PAGO se computa:
+
+```python
+base_aplicable = arancel + scf + payway        # base servicios bancarios
+iva     = round(base_aplicable * tasa_iva, 2)   # 21% sobre base
+sirtac  = round(monto_pres * tasa_sirtac, 2)    # 1.5% sobre monto presentado
+afip_dgi = afip_por_fecha.get(fecha_pago, 0)    # de la Constancia RG 796
+# Perc.IB por RESIDUAL = lo que queda en Deduc.Impositivas tras descontar los otros
+perc_ib  = round(deduc_imp - iva - sirtac - afip_dgi, 2)
+```
+
+> [!IMPORTANT]
+> **Perc.IB se calcula por residuo** sobre la línea `Deduc.Impositivas` del PDF (no por fórmula directa) para que el resultado refleje exactamente lo que el banco descontó. Esto da `0` correcto en días puramente Tj.Débito (donde no aplica Perc.IB) y los valores reales en operaciones de crédito/cuotas. Si el PDF no tiene Constancia, fallback a fórmula `base_aplicable * tasa_perc_ib`.
+
+###### Metadata auto-extraída del encabezado ([app.py:L865-L890](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L865-L890))
+
+El parser también extrae del encabezado del PDF:
+- **Razón Social** (entre `Razón Social\n` y `Establecimiento`)
+- **Periodo** (de `FECHA DE EMISION:` → `MM/AAAA`)
+- **Nro de Resumen** (12 dígitos en la línea siguiente a la fecha de emisión)
+- **Tasas** (etiquetas `tasa_iva_label`, `tasa_perc_ib_label`, `tasa_sirtac_label` para mostrar en headers de columna)
+
+Estos valores **pre-llenan automáticamente los inputs de la UI** vía `st.session_state` ([app.py:L1996-L2014](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L1996-L2014)) cuando el usuario sube el PDF. El usuario puede sobrescribir manualmente; el auto-fill solo dispara cuando cambia el `file_id` (nombre + tamaño).
+
+###### Excel generado
+
+**Una única hoja "Liquidaciones"** con 13 columnas:
+
+| # | Columna | Tipo | Cálculo |
+|---|---|---|---|
+| 1 | Fecha Pago | text | `DD/MM/YYYY` |
+| 2 | Fecha Pres. | text | `DD/MM/YYYY` |
+| 3 | Liquidaciones | text | Liq.N° concatenadas |
+| 4 | Detalle | text | Renglones de ventas concatenados con `+` |
+| 5 | Monto Presentado | money | `Total del día`, columna 1 |
+| 6 | Arancel | money | parseado del bloque |
+| 7 | Serv. Costos Financieros | money | parseado (incluye `Serv.Cobro Anticipado` si está en el bloque) |
+| 8 | Servicio PAYWAY | money | parseado |
+| 9 | IVA {tasa} % | money | fórmula: `(Arancel+SCF+PAYWAY) × tasa_iva` |
+| 10 | Perc. IB {tasa} % | money | residual: `Deduc.Imp − IVA − SIRTAC − AFIP` |
+| 11 | Ret. IB SIRTAC {tasa} % | money | fórmula: `MontoPres × tasa_sirtac` |
+| 12 | AFIP-DGI | money | suma de Constancia RG 796 por `Fecha Pago` |
+| 13 | Neto Percibido | money | `Total del día`, columna 3 |
+
+Las etiquetas de IVA / Perc.IB / SIRTAC se renombran dinámicamente con la alícuota leída del Desglose (ej. `IVA 21,00 %`).
+
+**Encabezado** (filas 2-6): `LIQUIDACION DE TARJETA: {VISA/MASTERCARD/...} SANTANDER`, contribuyente, comprobante `FC AAMM-{nro_resumen sin ceros}/A`, banco, periodo. El selectbox de tarjeta para Santander muestra solo empresas (sin Crédito/Débito) ya que el resumen Santander es consolidado.
+
+**Resumen Impositivo** debajo del TOTAL ([app.py:L2235-L2275](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L2235-L2275)) — referencia las celdas TOTAL de la propia tabla:
+
+```
+NETO 21         = Arancel{TR} + SCF{TR} + PAYWAY{TR}
+IVA 21          = IVA{TR}
+PERC. IB BS AS  = PercIB{TR}
+SIRTAC          = SIRTAC{TR}
+PERC. AFIP-DGI  = AFIPDGI{TR}
+TOTAL           = SUM(IVA + PercIB + SIRTAC + AFIP)   ← excluye NETO 21 (es base, no descuento)
+```
+
+###### Cuadres validados (PDFs de prueba)
+
+| | Liq | Monto Pres. | Neto Perc. | IVA | Perc.IB | SIRTAC | AFIP-DGI |
+|---|---|---|---|---|---|---|---|
+| #1 (00134312) | 16 | 10.516.200,00 | 8.397.419,23 | 322.077,68 (±0,09) | 59.452,47 (±0,09) | 157.743,00 ✓ | 45.804,42 ✓ |
+| #2 (00430192) | 5 | 1.456.000,80 | 1.106.056,19 | 53.847,00 (±0,04) | 10.150,91 (±0,04) | 21.840,01 ✓ | 7.692,41 ✓ |
+| #3 (00964575) | 1 | 189.000,00 | 136.679,60 | 8.141,70 ✓ | 1.470,68 ✓ | 2.835,00 ✓ | 1.103,01 ✓ |
+| #4 (00600417) — vacío | 1 | 0,00 | 0,00 | 0 | 0 | 0 | 0 |
+
+Las diferencias de centavos en PDF #1 y #2 son rounding entre filas (IVA y Perc.IB se compensan: la suma `IVA + Perc.IB` siempre cuadra exacto). PDFs sin Constancia RG 796 (poco probable) usan formula directa para Perc.IB y AFIP queda en 0.
 
 #### 6. Limpieza Excel Deducciones IVA/Ganancias
 
@@ -1163,7 +1268,7 @@ flowchart TB
     subgraph "Entrada"
         TXT["📄 TXT Mendez<br/>(texto fijo ANSI)"]
         ZIP["📦 ZIP ARCA<br/>(CSV semicolon)"]
-        PDF["📄 PDF FISERV<br/>(liquidaciones)"]
+        PDF["📄 PDF Liquidaciones<br/>(Fiserv / Santander)"]
         XLS["📊 XLS Sistema<br/>(Excel legacy)"]
         DED["📊 XLS Deducciones<br/>(Mis Retenciones ARCA)"]
     end
@@ -1178,14 +1283,14 @@ flowchart TB
     subgraph "Transformación"
         T1["Clasificar por IVA_RATES<br/>Separar deducciones vs impuestos<br/>Invertir signos NC"]
         T2["Renombrar cols por keywords<br/>Mapear tipos ARCA<br/>Convertir montos"]
-        T3["Detectar bloques de liquidación<br/>Separar Liquidaciones/QR/Ajuste"]
+        T3["Detectar bloques de liquidación<br/>Fiserv: VENTAS/QR/Ajuste<br/>Santander: FECHA DE PAGO + Constancia RG 796"]
         T4["Construir lookup concepto<br/>Forward-fill sub-filas"]
     end
 
     subgraph "Salida"
         E1["📊 Excel multi-hoja<br/>(hasta 11 sheets)"]
         E2["📊 Excel limpio<br/>(1 sheet formateado)"]
-        E3["📊 Excel verde<br/>(3 sheets + resumen)"]
+        E3["📊 Excel verde<br/>(Fiserv: 3 sheets / Santander: 1 sheet)"]
         E4["📊 Excel dorado<br/>(Ret + Perc sheets)"]
         S1["📄 TXT SIFERE<br/>(posicional fijo)"]
         S2["📄 TXT ARBA<br/>(71 chars/línea)"]
