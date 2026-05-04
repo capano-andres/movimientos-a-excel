@@ -1481,6 +1481,8 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
 
         # ── Hoja Asiento Contable ────────────────────────────────
         if con_asiento:
+            es_ventas = 'VENTA' in (meta.get('tipo_reporte') or '').upper()
+
             # --- Columnas de neto (base imponible) y de IVA ---
             _as_neto_base_cols = [
                 c for c in IVA_COL_ORDER
