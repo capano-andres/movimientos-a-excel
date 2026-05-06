@@ -3850,7 +3850,7 @@ def generar_zip_retenciones_arca(csv_text: str, periodo_yyyymm: str, *, now=None
     timestamp = now.strftime('%Y%m%d_%H%M')
     basename = f"comprobantes_periodo_{periodo_yyyymm}_compras_{timestamp}"
     zip_name = f"{basename}.zip"
-    csv_name = f"{basename}.csv"
+    csv_name = f"{basename} (montos expresados en pesos).csv"
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
