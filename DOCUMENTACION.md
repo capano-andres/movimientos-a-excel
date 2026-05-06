@@ -1004,7 +1004,7 @@ El sistema Mendez/ADDISYC importa comprobantes de compras leyendo el CSV de ARCA
 3. Localiza la columna de CUIT del proveedor en el CSV de ARCA buscando partial-match en el header (`nro/mero` + `doc` + `vendedor/comprador`, o columna literal `cuit`).
 4. Para cada fila del ARCA, normaliza el CUIT (`re.sub(r'[^0-9]', '', val)`) y consulta `concepto_por_cuit`.
 5. Agrupa filas por concepto resuelto con `df.groupby('_concepto', dropna=False)`. Las filas sin match (CUIT que no figura en el TXT, o proveedor sin Concepto en sus transacciones) caen en el grupo `NaN`.
-6. Para cada grupo: serializa a CSV con `df.to_csv(sep=sep, lineterminator='\n')`, codifica a `latin-1` y lo empaqueta en un `.zip` independiente. El nombre se deriva del **ZIP subido por el usuario**: se toma el stem del ZIP de ARCA (típicamente `comprobantes_periodo_{YYYYMM}_compras_{YYYYMMDD}_{HHMM}`), se descarta el sufijo `_HHMM` y se reemplaza por `_{codigo:0000}`. El grupo `NaN` (comprobantes sin concepto resuelto) usa el código reservado `_0000`. El CSV interno toma el mismo nombre base con extensión `.csv`. Si el ZIP subido no matchea el patrón esperado, se usa el stem completo como prefijo (fallback).
+6. Para cada grupo: serializa a CSV con `df.to_csv(sep=sep, lineterminator='\n')`, codifica a `latin-1` y lo empaqueta en un `.zip` independiente. El nombre se deriva del **ZIP subido por el usuario**: se toma el stem del ZIP de ARCA (típicamente `comprobantes_periodo_{YYYYMM}_compras_{YYYYMMDD}_{HHMM}`), se descarta el sufijo `_HHMM` y se reemplaza por `_{codigo:0000}`. El grupo `NaN` (comprobantes sin concepto resuelto) usa el código reservado `_0000`. El CSV interno toma el mismo nombre base con el sufijo `" (montos expresados en pesos)"` y extensión `.csv` (replicando el formato del CSV emitido por el Portal IVA). Si el ZIP subido no matchea el patrón esperado, se usa el stem completo como prefijo (fallback).
 7. Empaqueta todos los `.zip` por concepto **dentro de un único `.zip` contenedor** que conserva exactamente el nombre del ZIP subido por el usuario, y se entrega vía `st.download_button`.
 
 > [!NOTE]
@@ -1022,7 +1022,7 @@ Toda la nomenclatura se deriva del nombre del ZIP que sube el usuario. El patró
 | ZIP por concepto cruzado | `{prefijo}_{YYYYMMDD}_{codigo:0000}.zip` (ej. `comprobantes_periodo_202603_compras_20260408_0045.zip`) |
 | ZIP comprobantes sin cruce | `{prefijo}_{YYYYMMDD}_0000.zip` (código reservado `0000` = sin concepto resuelto) |
 | ZIP contenedor descargable | Mismo nombre exacto del ZIP subido por el usuario (sin modificar) |
-| CSV interno de cada ZIP | Mismo nombre base que su ZIP contenedor, con extensión `.csv` |
+| CSV interno de cada ZIP | `{prefijo}_{YYYYMMDD}_{codigo:0000} (montos expresados en pesos).csv` |
 
 > [!NOTE]
 > Si el ZIP subido **no matchea** el patrón `_{YYYYMMDD}_{HHMM}` (subida manual con nombre arbitrario), el helper `_prefijo_desde_zip()` cae al fallback y usa el stem completo como prefijo. Ejemplo: un upload llamado `archivo_random.zip` produce `archivo_random_0045.zip` por concepto.
@@ -1036,7 +1036,7 @@ El código de concepto se toma de la columna `Concepto` de las transacciones del
 - Botón único de descarga del `.zip` contenedor.
 
 > [!IMPORTANT]
-> El CSV de salida es **byte-a-byte equivalente** al CSV de ARCA original en su estructura (mismas columnas, mismo separator, mismo encoding `latin-1`) — sólo cambia el subconjunto de filas y el **nombre interno** del CSV (que ahora sigue el patrón `{prefijo}_{YYYYMMDD}_{codigo:0000}.csv`, no el nombre original del CSV de ARCA). Esto garantiza que el sistema Mendez lo acepte como si viniera directamente del Portal IVA.
+> El CSV de salida es **byte-a-byte equivalente** al CSV de ARCA original en su estructura (mismas columnas, mismo separator, mismo encoding `latin-1`) — sólo cambia el subconjunto de filas y el **nombre interno** del CSV (que ahora sigue el patrón `{prefijo}_{YYYYMMDD}_{codigo:0000} (montos expresados en pesos).csv`, no el nombre original del CSV de ARCA). El sufijo `" (montos expresados en pesos)"` es literal y replica el naming que usa el Portal IVA de ARCA, condición necesaria para que el sistema Mendez acepte el archivo como si viniera directamente del Portal.
 
 > [!NOTE]
 > Los comprobantes que aparecen en ARCA pero no en el TXT (y por lo tanto no tienen Concepto asignado) **no se descartan**: van al ZIP con código reservado `_0000` para que el usuario los revise manualmente y decida qué hacer con ellos.

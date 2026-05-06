@@ -5612,7 +5612,7 @@ elif herramienta == TOOL_IMPORTACION:
                             label = f"{cod_padded} · {descripcion}"
 
                         zip_name = f"{nombre_base}.zip"
-                        csv_inner_name = f"{nombre_base}.csv"
+                        csv_inner_name = f"{nombre_base} (montos expresados en pesos).csv"
 
                         inner_buf = io.BytesIO()
                         with zipfile.ZipFile(inner_buf, 'w', zipfile.ZIP_DEFLATED) as zin:
