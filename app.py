@@ -5553,6 +5553,9 @@ elif herramienta == TOOL_IMPORTACION:
                     concepto = t.get('Concepto')
                     if concepto in (None, '', 0):
                         continue
+                    numero = str(t.get('Numero') or '').strip()
+                    if not numero or not numero[-1].isalpha():
+                        continue
                     cuit_counters.setdefault(cuit_norm, Counter())[concepto] += 1
 
                 concepto_por_cuit = {

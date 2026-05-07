@@ -999,7 +999,7 @@ El sistema Mendez/ADDISYC importa comprobantes de compras leyendo el CSV de ARCA
 
 **Algoritmo:**
 
-1. Parsea el TXT con `parsear_archivo()` y construye `concepto_por_cuit[CUIT_normalizado] → concepto_num` agrupando todas las transacciones del proveedor con `collections.Counter` y eligiendo el **concepto más frecuente** (`Counter.most_common(1)`). El CUIT se normaliza eliminando todo carácter no numérico.
+1. Parsea el TXT con `parsear_archivo()` y construye `concepto_por_cuit[CUIT_normalizado] → concepto_num` agrupando las transacciones del proveedor con `collections.Counter` y eligiendo el **concepto más frecuente** (`Counter.most_common(1)`). El CUIT se normaliza eliminando todo carácter no numérico. **Las transacciones cuyo `Numero` no termina en letra de comprobante (A/B/C/E/M/...) se descartan del conteo**: en el TXT son retenciones u otros movimientos internos (RET.GCIAS, RET.I.V.A., RET.IB.*, RET. SIRCREB *, SIRTAC *, RET BCO *) cargados como `FC` con un Concepto contable genérico (típicamente 87 "prestación de servicios"). Sin este filtro contaminarían el conteo y un proveedor con muchas retenciones quedaría mal mapeado.
 2. Lee el CSV de ARCA del ZIP con `pd.read_csv(dtype=str, keep_default_na=False)` para **preservar todos los valores como strings sin reformateo numérico** (mismo encoding `latin-1`, mismo separator auto-detectado).
 3. Localiza la columna de CUIT del proveedor en el CSV de ARCA buscando partial-match en el header (`nro/mero` + `doc` + `vendedor/comprador`, o columna literal `cuit`).
 4. Para cada fila del ARCA, normaliza el CUIT (`re.sub(r'[^0-9]', '', val)`) y consulta `concepto_por_cuit`.
@@ -1009,6 +1009,9 @@ El sistema Mendez/ADDISYC importa comprobantes de compras leyendo el CSV de ARCA
 
 > [!NOTE]
 > **Empate de conceptos:** si un proveedor tiene exactamente la misma cantidad de transacciones con dos conceptos distintos, `Counter.most_common(1)` devuelve el primero según el orden de inserción (el primer concepto encontrado al leer el TXT de arriba hacia abajo).
+
+> [!NOTE]
+> **Filtro de retenciones (heurística por letra de comprobante):** las facturas reales en el TXT siempre tienen letra (`A`/`B`/`C`/`E`/`M`/...) en el sufijo del `Numero` (ej. `01326-02132815A`, `00001-00000002C`); las retenciones — al ser asientos internos del sistema — no la tienen (ej. `00002-00053318`, `02025-00000320`). El filtro chequea `Numero[-1].isalpha()` y es robusto porque ambas reglas son consistentes en la salida del parser.
 
 > [!TIP]
 > Si necesitás **editar el CSV de ARCA antes de particionar** (por ejemplo: corregir CUITs erróneos, filtrar comprobantes, modificar montos), usá primero el modo **"Edición .zip"** de la herramienta 2 ([Archivo .zip PORTAL IVA](#2-archivo-zip-portal-iva)) para round-trip a Excel, y después usá el `.zip` editado como input de esta herramienta.

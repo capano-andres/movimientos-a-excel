@@ -91,9 +91,23 @@ RE_MAIN = re.compile(
     r'(\d{5}-\d{1,12}[A-Z ]?)\s*'                   # Numero (más flexible para exportación)
     r'(.+?)\s+'                                     # Proveedor (Flexible hasta Cond IVA o CUIT)
     r'(?:(Ins\.|Mono|Monot|Exe |Exe\.|C\.F\.|Exp\.|Resp\.|SNC)\s+)?'  # Cond IVA OPCIONAL (a veces no viene)
-    r'([\d\- ]{1,13})?\s+'                          # CUIT/DNI (Opcional. Permitimos espacios internos por DNIs mal tipeados)
+    r'(\d[\d\- ]{5,11}\d)?\s+'                      # CUIT/DNI (Opcional. Requiere mínimo 7 chars start/end con dígito para no canibalizar dígitos del nombre del proveedor)
     r'(\d{1,3})\s+'                                 # Concepto
     r'([A-Z0-9])\s+'                                # Jurisdicción (Letra A-Z o 0 para exportación)
+    r'(.+)$'                                        # Resto (tasa + montos)
+)
+
+# Regex para tickets a Consumidor Final en TXT Ventas
+# Ejemplo: " 6 TK 00007-00000938  H.: 00007-00000938     C.F.                83 B C.F.21%       461949,57      97009,41          0,00     558958,98"
+# Layout sin Proveedor, con marcador "H.: <Numero>" entre el Numero y el Cond IVA "C.F."
+RE_TK_VENTAS = re.compile(
+    r'^\s*(\d{1,2})\s+'                            # Dia
+    r'(TK|TF)\s+'                                   # Tipo (sólo tickets)
+    r'(\d{5}-\d{1,12}[A-Z ]?)\s+'                   # Numero (Desde)
+    r'H\.:\s*[\d\-]+[A-Z ]?\s+'                     # Hasta (consumido, no se captura)
+    r'(C\.F\.|Cf\.)\s+'                             # Cond IVA (Consumidor Final)
+    r'(\d{1,3})\s+'                                 # Concepto
+    r'([A-Z0-9])\s+'                                # Letra
     r'(.+)$'                                        # Resto (tasa + montos)
 )
 
@@ -243,6 +257,40 @@ def parsear_archivo(path: Path = None, content: str = None) -> tuple[list[dict],
             # porque puede continuar en la página siguiente
             continue
         
+        # Intentar match de TK ventas (tickets a Consumidor Final con marcador "H.:")
+        m_tk = RE_TK_VENTAS.match(linea)
+        if m_tk:
+            dia = int(m_tk.group(1))
+            tipo = m_tk.group(2).strip()
+            numero = m_tk.group(3).strip()
+            cond_iva = m_tk.group(4).strip()
+            concepto = int(m_tk.group(5))
+            letra = m_tk.group(6).strip()
+            resto = m_tk.group(7)
+
+            tasa_str, neto, iva, percepcion, total = extraer_montos_resto(resto)
+
+            if current:
+                transacciones.append(current)
+
+            current = {
+                'Fecha': dia,
+                'Tipo': tipo,
+                'Numero': numero,
+                'Proveedor': '',
+                'Cond_IVA': cond_iva,
+                'CUIT': '',
+                'Concepto': concepto,
+                'Letra': letra,
+                'Tasa': tasa_str,
+                'Neto': neto,
+                'IVA': iva,
+                'Percepcion': percepcion,
+                'Total': total,
+                'SubConceptos': []
+            }
+            continue
+
         # Intentar match de línea principal
         m = RE_MAIN.match(linea)
         if m:
