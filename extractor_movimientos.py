@@ -3138,6 +3138,13 @@ def _citi_desc_tipo(cod) -> str:
         return str(cod)
 
 
+# Tipos "letra A" para los que NO traemos datos del contribuyente: se anonimizan
+# (DocCod=99, DocNro=99999999, Denom='') antes de consolidar, así todas las A del
+# mismo día/PV/tipo colapsan en una sola fila — como ocurre con B/Z a CF.
+# Aplica sólo al flujo Mendez (no compatible con presentación AFIP CITI Ventas).
+CITI_TIPOS_A_ANONIMIZAR = {1, 2, 3, 201, 202, 203}
+
+
 CITI_ALIC_CODIGOS = {
     'IVA 0%':    '0003',
     'IVA 2.5%':  '0009',
@@ -3292,13 +3299,24 @@ def consolidar_ventas_citi(df_norm: pd.DataFrame) -> pd.DataFrame:
     """
     Agrupa por (Fecha, PV, Tipo, DocCod, Doc) — consolidación tipo Ticket Z.
     Tickets a CF (DocCod=99, Doc=99999999) se acumulan en una línea por día/PV/tipo.
-    Facturas con CUITs distintos quedan separadas.
+
+    Letra A estándar (Tipos 1/2/3 + MiPyME 201/202/203) se anonimiza antes del
+    groupby — DocCod=99, Doc=99999999, Denom='' — para que también colapse en
+    una línea por día/PV/tipo (sólo para importar a Mendez, no para AFIP).
     """
     if df_norm.empty:
         return df_norm.copy()
 
-    # Cantidad de comprobantes contemplada en cada fila original (rangos pre-consolidados):
     df = df_norm.copy()
+
+    # Anonimizar A-letra para forzar la consolidación tipo Ticket Z
+    mask_a = df['tipo'].isin(CITI_TIPOS_A_ANONIMIZAR)
+    if mask_a.any():
+        df.loc[mask_a, 'doc_cod'] = 99
+        df.loc[mask_a, 'doc_nro'] = '99999999'
+        df.loc[mask_a, 'denom'] = ''
+
+    # Cantidad de comprobantes contemplada en cada fila original (rangos pre-consolidados):
     df['_cant_fila'] = (df['numero_hasta'] - df['numero'] + 1).clip(lower=1)
 
     grupos = df.groupby(['fecha', 'pv', 'tipo', 'doc_cod', 'doc_nro'], dropna=False, sort=True)
@@ -3721,20 +3739,20 @@ def crear_excel_ventas_citi(
 # nombres). Mantenerlos byte-equivalentes al template asegura que el sistema
 # Mendez los acepte igual que cuando el operador exporta a CSV manualmente.
 RETENCIONES_OUTPUT_HEADERS = [
-    "Fecha de EmisiÃ³n",
+    "Fecha de Emisión",
     "Tipo de Comprobante",
     "Punto de Venta",
-    "NÃºmero de Comprobante",
+    "Número de Comprobante",
     "Tipo Doc. Vendedor",
     "Nro. Doc. Vendedor",
-    "DenominaciÃ³n Vendedor",
+    "Denominación Vendedor",
     "Importe Total",
     "Moneda Original",
     "Tipo de Cambio",
     "Importe No Gravado",
     "Importe Exento",
-    "CrÃ©dito Fiscal Computable",
-    " Importe de Per. o Pagos a Cta. de Otros Imp. Nac. ",
+    "Crédito Fiscal Computable",
+    "Importe de Per. o Pagos a Cta. de Otros Imp. Nac.",
     "Importe de Percepciones de Ingresos Brutos",
     "Importe de Impuestos Municipales",
     "Importe de Percepciones o Pagos a Cuenta de IVA",
@@ -3785,11 +3803,14 @@ def parsear_arca_retenciones_xls(file_bytes: bytes) -> pd.DataFrame:
 
 
 def _fmt_importe_arg(val) -> str:
-    """Formatea un número en notación argentina (1.234,56) con 2 decimales fijos."""
+    """Formatea un número con coma decimal y 2 decimales fijos, SIN separador de miles.
+
+    Coincide con el formato del Portal IVA de ARCA (ej. 169386,72) para que Mendez
+    no interprete el punto como decimal y trunque el importe.
+    """
     if val is None or pd.isna(val):
         return ''
-    s = f"{float(val):,.2f}"
-    return s.replace(',', '\x00').replace('.', ',').replace('\x00', '.')
+    return f"{float(val):.2f}".replace('.', ',')
 
 
 def _fmt_fecha_iso(s) -> str:
@@ -3858,7 +3879,7 @@ def transformar_retenciones_a_csv_arca(df: pd.DataFrame):
 
         rows.append([
             fecha_iso,    # 1  Fecha de Emisión
-            '99',         # 2  Tipo de Comprobante
+            '1',          # 2  Tipo de Comprobante (Factura A → Mendez infiere Cond IVA = RI)
             cert_s[:2],   # 3  Punto de Venta
             cert_s[-8:],  # 4  Número de Comprobante
             '80',         # 5  Tipo Doc. Vendedor
@@ -3866,7 +3887,7 @@ def transformar_retenciones_a_csv_arca(df: pd.DataFrame):
             denom_s,      # 7  Denominación Vendedor
             importe_s,    # 8  Importe Total
             'PES',        # 9  Moneda Original
-            '1',          # 10 Tipo de Cambio
+            '1,00',       # 10 Tipo de Cambio
             '',           # 11 Importe No Gravado
             '',           # 12 Importe Exento
             '',           # 13 Crédito Fiscal Computable
@@ -3878,8 +3899,16 @@ def transformar_retenciones_a_csv_arca(df: pd.DataFrame):
     else:
         periodo = _dt.now().strftime('%Y%m')
 
-    df_out = pd.DataFrame(rows, columns=RETENCIONES_OUTPUT_HEADERS)
-    csv_text = df_out.to_csv(sep=';', index=False, lineterminator='\n')
+    # Quoting estilo Portal IVA: headers + strings (Denominación, Moneda) entre
+    # comillas dobles; números sin comillas. Construimos manualmente porque
+    # ningún campo contiene `;`, `"` ni saltos de línea.
+    buf = io.StringIO()
+    buf.write(';'.join(f'"{h}"' for h in RETENCIONES_OUTPUT_HEADERS) + '\n')
+    quoted_cols = {6, 8}  # 0-indexed: Denominación Vendedor, Moneda Original
+    for r in rows:
+        parts = [(f'"{v}"' if (i in quoted_cols and v != '') else str(v)) for i, v in enumerate(r)]
+        buf.write(';'.join(parts) + '\n')
+    csv_text = buf.getvalue()
     return csv_text, periodo
 
 

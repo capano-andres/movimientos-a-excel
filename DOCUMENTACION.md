@@ -1082,13 +1082,14 @@ Históricamente este flujo se hacía con un Excel macro manual (`Armado CITI Ven
 
 **Consolidación tipo Ticket Z:**
 
-La clave de agrupación `(Fecha, PV, Tipo, DocCod, Doc)` produce naturalmente el comportamiento deseado:
+La clave de agrupación `(Fecha, PV, Tipo, DocCod, Doc)` produce el comportamiento deseado, con un pre-paso de **anonimización para letra A**:
 
 - **Tickets B/Z (DocCod=99, Doc=99999999)** — todas las filas del día con el mismo PV+Tipo se acumulan en una línea con su rango Desde-Hasta. Caso típico: tipo 83 (Tique) con 100+ comprobantes por día se reduce a 1 fila.
-- **Facturas A con CUIT identificado (DocCod=80)** — cada CUIT distinto produce su propia fila, porque la clave de agrupación incluye `Doc`. Si el mismo CUIT aparece dos veces en el día con el mismo Tipo, se consolidan; si no, quedan separadas.
+- **Facturas A estándar (Tipos 1/2/3) y A MiPyME (Tipos 201/202/203)** — antes del groupby se reescribe `DocCod=99`, `Doc=99999999`, `Denom=''` (constante `CITI_TIPOS_A_ANONIMIZAR` en [extractor_movimientos.py](extractor_movimientos.py)), forzando la misma consolidación que B/Z: una sola línea por (día, PV, tipo). El TXT VENTAS llevará `99 / 00000000000099999999` y 30 espacios en Denominación.
+- **Resto de tipos A** (4, 5, 27, 34, 39, 51, 63, 81): siguen splitteándose por CUIT como antes.
 
-> [!NOTE]
-> No se eligen tipos manualmente — la consolidación es uniforme por la clave de agrupación. El comportamiento "Ticket Z" emerge automáticamente del hecho de que los tickets a consumidor final comparten DocCod=99 y Doc=99999999.
+> [!WARNING]
+> **Este flujo es sólo para Mendez**. La anonimización de A con `DocCod=99` rompe la compatibilidad con la presentación AFIP CITI Ventas (RG 3685), donde A debe llevar `DocCod=80` + CUIT válido. Si se necesita el archivo para AFIP, no usar esta herramienta.
 
 **Layout VENTAS.txt — REGINFO_CV_VENTAS_CBTE (266 chars):**
 
@@ -1207,43 +1208,44 @@ El sistema Mendez importa las retenciones de IVA y Ganancias del régimen SICORE
 **Algoritmo:**
 
 1. **Parsea** el XLS con `parsear_arca_retenciones_xls()` → `pd.read_excel(io.BytesIO(...))` (delega a `xlrd` ya parchado para `utter_max_rows`). Valida que las 5 columnas críticas estén presentes (CUIT Agente, Denominación, Fecha Ret., Número Certificado, Importe). Si faltan → `ValueError` con detalle.
-2. **Transforma** con `transformar_retenciones_a_csv_arca()` aplicando el mapeo del template Excel:
+2. **Transforma** con `transformar_retenciones_a_csv_arca()` replicando el formato real del Portal IVA de ARCA (Mis Comprobantes - Compras):
 
    | # Columna salida | Fuente / regla |
    |---|---|
    | 1 Fecha de Emisión | `Fecha Ret./Perc.` (`DD/MM/YYYY`) → `YYYY-MM-DD` |
-   | 2 Tipo de Comprobante | `99` (constante) |
+   | 2 Tipo de Comprobante | `1` (Factura A — única forma de que Mendez clasifique al Vendedor como Responsable Inscripto, ya que sólo los RI emiten Factura A. Si se usa `99` (Recibo) Mendez lo cataloga como Consumidor Final) |
    | 3 Punto de Venta | `Número Certificado[:2]` (primeros 2 chars) |
    | 4 Número de Comprobante | `Número Certificado[-8:]` (últimos 8 chars) |
    | 5 Tipo Doc. Vendedor | `80` (constante, CUIT) |
    | 6 Nro. Doc. Vendedor | `CUIT Agente Ret./Perc.` |
-   | 7 Denominación Vendedor | `Denominación o Razón Social` |
-   | 8 Importe Total | `Importe Ret./Perc.` formato argentino `1.234,56` |
-   | 9 Moneda Original | `PES` |
-   | 10 Tipo de Cambio | `1` |
+   | 7 Denominación Vendedor | `Denominación o Razón Social` (entre comillas dobles) |
+   | 8 Importe Total | `Importe Ret./Perc.` con coma decimal **sin separador de miles** (ej. `428477,74`) |
+   | 9 Moneda Original | `"PES"` (entre comillas dobles) |
+   | 10 Tipo de Cambio | `1,00` |
    | 14 Importe de Per. o Pagos a Cta. de Otros Imp. Nac. | `Importe Ret./Perc.` (mismo importe que col 8) |
    | 11–13, 15–32 | vacíos |
 
 3. **Empaqueta** con `generar_zip_retenciones_arca()`: serializa el DataFrame a CSV con `to_csv(sep=';', lineterminator='\n')`, lo encodea a `latin-1` (reemplazando errores) y lo escribe dentro de un `.zip` siguiendo el patrón de naming del Portal IVA de ARCA: `comprobantes_periodo_{YYYYMM}_compras_{YYYYMMDD}_{HHMM}.zip` (CSV interno con el mismo basename `.csv`). El `YYYYMM` se infiere del mes/año más frecuente de `Fecha Ret./Perc.`; el timestamp `YYYYMMDD_HHMM` es la hora actual.
 
-**Headers de salida — byte-equivalentes al template Excel:**
+**Headers de salida — byte-equivalentes al CSV del Portal IVA:**
 
-> [!IMPORTANT]
-> El template original `FORMULA PARA IMPORTAR RETENCIONES V.2.0.xlsx` tiene los headers con **doble-encoding mojibake** (ej. `Fecha de EmisiÃ³n` en lugar de `Fecha de Emisión`) — probablemente porque quien lo armó pegó headers de un CSV `latin-1` interpretándolos como UTF-8. La herramienta **respeta esos headers exactos** porque cuando se exportan a CSV con encoding `latin-1` producen los bytes `0xC3 0xB3` (la representación correcta de `ó` en UTF-8 vista como dos chars latin-1), que es lo que el sistema Mendez espera al re-leer en latin-1. Cambiar los headers por la forma "limpia" rompería la importación.
+Los headers van con acentos limpios (`Emisión`, `Número`, `Denominación`, `Crédito`) y **wrappeados en comillas dobles**. Al encodear a `latin-1` producen los mismos bytes que el CSV real del Portal IVA (single-byte `\xf3` para `ó`, etc.) — verificado contra `comprobantes_periodo_*_compras_*.zip` descargado del Portal IVA.
 
 **Layout del CSV de salida (32 columnas):**
 
 ```
-Fecha de Emisión;Tipo de Comprobante;Punto de Venta;Número de Comprobante;Tipo Doc. Vendedor;Nro. Doc. Vendedor;Denominación Vendedor;Importe Total;Moneda Original;Tipo de Cambio;Importe No Gravado;Importe Exento;Crédito Fiscal Computable; Importe de Per. o Pagos a Cta. de Otros Imp. Nac. ;Importe de Percepciones de Ingresos Brutos;Importe de Impuestos Municipales;Importe de Percepciones o Pagos a Cuenta de IVA;Importe de Impuestos Internos;Importe Otros Tributos;Neto Gravado IVA 0%;Neto Gravado IVA 2,5%;Importe IVA 2,5%;Neto Gravado IVA 5%;Importe IVA 5%;Neto Gravado IVA 10,5%;Importe IVA 10,5%;Neto Gravado IVA 21%;Importe IVA 21%;Neto Gravado IVA 27%;Importe IVA 27%;Total Neto Gravado;Total IVA
+"Fecha de Emisión";"Tipo de Comprobante";"Punto de Venta";"Número de Comprobante";"Tipo Doc. Vendedor";"Nro. Doc. Vendedor";"Denominación Vendedor";"Importe Total";"Moneda Original";"Tipo de Cambio";"Importe No Gravado";"Importe Exento";"Crédito Fiscal Computable";"Importe de Per. o Pagos a Cta. de Otros Imp. Nac.";"Importe de Percepciones de Ingresos Brutos";"Importe de Impuestos Municipales";"Importe de Percepciones o Pagos a Cuenta de IVA";"Importe de Impuestos Internos";"Importe Otros Tributos";"Neto Gravado IVA 0%";"Neto Gravado IVA 2,5%";"Importe IVA 2,5%";"Neto Gravado IVA 5%";"Importe IVA 5%";"Neto Gravado IVA 10,5%";"Importe IVA 10,5%";"Neto Gravado IVA 21%";"Importe IVA 21%";"Neto Gravado IVA 27%";"Importe IVA 27%";"Total Neto Gravado";"Total IVA"
 ```
+
+**Quoting en filas de datos:** strings (Denominación Vendedor, Moneda Original) entre comillas dobles; números (fecha ISO, tipo cbte, PV, nro, CUIT, importes, TC) **sin** comillas.
 
 **Ejemplo (fila 1 de IVA.xls — retención SICORE-IVA del 31/03/2026 a Aceitera General Deheza):**
 
 ```
-2026-03-31;99;20;26079026;80;30502874353;ACEITERA GENERAL DEHEZA S.A.;42.680,64;PES;1;;;;42.680,64;;;;;;;;;;;;;;;;;;
+2026-03-31;1;20;26079026;80;30502874353;"ACEITERA GENERAL DEHEZA S.A.";42680,64;"PES";1,00;;;;42680,64;;;;;;;;;;;;;;;;;;
 ```
 
-Desglose: PV=`20` y Nro=`26079026` salen del slicing del **Número Certificado** (`2026079026`); el `Importe Total` y la columna 14 llevan el mismo monto de la retención.
+Desglose: PV=`20` y Nro=`26079026` salen del slicing del **Número Certificado** (`2026079026`); el `Importe Total` y la columna 14 llevan el mismo monto de la retención (sin separador de miles para que Mendez no interprete el punto como decimal y trunque el importe).
 
 **UI (4 cards):**
 
