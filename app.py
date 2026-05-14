@@ -1,4 +1,7 @@
-﻿import streamlit as st
+﻿import sys
+sys.setrecursionlimit(10_000)  # default 1000 se queda corto para xlrd parseando .xls en Streamlit Cloud
+
+import streamlit as st
 import io
 import re
 import zipfile
