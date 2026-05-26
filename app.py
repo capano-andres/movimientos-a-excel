@@ -4838,10 +4838,12 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                             for _k in _orden:
                                 _regs = _grupos[_k]
                                 if len(_regs) == 1:
+                                    _regs[0]['_original_rows'] = [_regs[0]]
                                     _consolidados.append(_regs[0])
                                 else:
                                     _base = _regs[0].copy()
                                     _base['Monto'] = round(sum(_x.get('Monto', 0) for _x in _regs), 2)
+                                    _base['_original_rows'] = _regs[:]
                                     _consolidados.append(_base)
                             arba_detalle_list = _consolidados
 
@@ -4916,9 +4918,10 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                         if idx is not None:
                                             pool_men.pop(idx)
                                         else:
-                                            t_copy = t.copy()
-                                            t_copy['CUIT'] = cuit_fmt
-                                            lista_a_dif.append(t_copy)
+                                            for orig in t.get('_original_rows', [t]):
+                                                orig_copy = orig.copy()
+                                                orig_copy['CUIT'] = cuit_fmt
+                                                lista_a_dif.append(orig_copy)
 
 
                             # Estado por registro: ✓ Ok si fue emparejado, ⚠ Falta si quedó sin par
@@ -4951,7 +4954,7 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 df_arba_det['Estado'] = ''
                             else:
                                 df_arba_det['Estado'] = df_arba_det['_estado'].fillna('').astype(str).replace('nan', '')
-                                df_arba_det.drop(columns=['_idx', '_estado'], inplace=True, errors='ignore')
+                                df_arba_det.drop(columns=['_idx', '_estado', '_original_rows'], inplace=True, errors='ignore')
                             df_arba_det['Cantidad'] = ''
 
 
