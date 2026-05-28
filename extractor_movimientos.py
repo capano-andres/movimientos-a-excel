@@ -6,6 +6,7 @@ import pandas as pd
 # Eliminar el wrapping global de sys.stdout que causa error en Streamlit
 # (Se movió al bloque main())
 from pathlib import Path
+import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
@@ -587,6 +588,278 @@ def _construir_filas_consolidado(transacciones: list[dict], meta: dict,
         rows.append(row)
 
     return rows, IVA_COL_ORDER, other_cols, IVA_RATES
+
+
+def _escribir_hoja_asiento_contable(ws, df, meta, es_ventas, estilos, iva_col_order, other_cols):
+    """Escribe el contenido del Asiento Contable en la hoja `ws` usando `df` como dataset.
+
+    `estilos` es un dict con: title_font, title_fill, report_type_font,
+    header_fill, header_font, header_align, money_fmt, thin_border, center_align.
+    Devuelve el ancho usado (siempre 3) para que el llamador pueda fitear columnas.
+    """
+    title_font       = estilos['title_font']
+    title_fill       = estilos['title_fill']
+    report_type_font = estilos['report_type_font']
+    header_fill      = estilos['header_fill']
+    header_font      = estilos['header_font']
+    header_align     = estilos['header_align']
+    money_fmt        = estilos['money_fmt']
+    thin_border      = estilos['thin_border']
+    center_align     = estilos['center_align']
+
+    # --- Columnas de neto (base imponible) y de IVA ---
+    _as_neto_base_cols = [
+        c for c in iva_col_order
+        if c.startswith('Neto') or c in ('Exento', 'Monotributo')
+    ]
+    _as_iva_cols = [c for c in iva_col_order if c.startswith('IVA')]
+    _as_deducc_cols  = [c for c in other_cols if _es_deduccion(c)]
+    _as_individ_cols = [c for c in other_cols if not _es_deduccion(c)]
+    _as_all_neto_cols = _as_neto_base_cols + _as_individ_cols
+
+    # --- A. Neto por Concepto ---
+    if _as_all_neto_cols:
+        _conc_grp = df.groupby('Concepto')[_as_all_neto_cols].sum()
+        _conc_grp['_neto'] = _conc_grp.sum(axis=1)
+        _conc_total = _conc_grp[['_neto']].reset_index()
+        _conc_total = _conc_total[_conc_total['_neto'] != 0].copy()
+        _conc_total['Desc'] = _conc_total['Concepto'].apply(
+            lambda x: CONCEPTOS_MAP.get(str(x), f'Concepto {x}').replace('°', 'o.').upper()
+        )
+        _conc_total['_num'] = pd.to_numeric(_conc_total['Concepto'], errors='coerce')
+        _conc_total = _conc_total.sort_values('_num').drop(columns='_num')
+    else:
+        _conc_total = pd.DataFrame(columns=['Concepto', '_neto', 'Desc'])
+
+    # --- B. IVA total ---
+    _iva_total = float(df[_as_iva_cols].sum().sum()) if _as_iva_cols else 0.0
+
+    # --- C. Deducciones en orden (solo las que tienen valor != 0) ---
+    _deducc_items = []
+    for _c in _as_deducc_cols:
+        _v = float(df[_c].sum())
+        if _v != 0:
+            _deducc_items.append((_c, _v))
+
+    # --- D. IVA de NCs (para asiento de Restitución) ---
+    # NCs ya están negadas en df → abs() recupera el valor positivo
+    _nc_iva_total = (
+        abs(float(df.loc[df['Tipo'] == 'NC', _as_iva_cols].sum().sum()))
+        if _as_iva_cols else 0.0
+    )
+
+    # Filas 1-3: encabezado (razón social / tipo + título / CUIT + periodo)
+    ws.merge_cells('A1:C1')
+    ws['A1'] = meta['razon_social'].upper() if meta['razon_social'] else 'CONTRIBUYENTE'
+    ws['A1'].font = title_font
+    ws['A1'].fill = title_fill
+    ws['A1'].alignment = center_align
+
+    ws.merge_cells('A2:C2')
+    _tr_label = (
+        f"{meta['tipo_reporte'].upper()} - ASIENTO CONTABLE"
+        if meta['tipo_reporte'] else 'ASIENTO CONTABLE'
+    )
+    ws['A2'] = _tr_label
+    ws['A2'].font = report_type_font
+    ws['A2'].alignment = center_align
+
+    ws.merge_cells('A3:C3')
+    ws['A3'] = f"CUIT: {meta['cuit_empresa']} | Periodo: {meta['periodo']}"
+    ws['A3'].font = Font(bold=True, size=11, color='2F5496')
+    ws['A3'].alignment = center_align
+
+    # Headers de columna en fila 5 (fila 4 separadora)
+    _as_header_row  = 5
+    _as_data_start  = 6
+    _as_header_labels = ['DESCRIPCIÓN', 'DEBE', 'HABER']
+    _as_col_fills = [
+        header_fill,                              # Descripción → azul
+        PatternFill('solid', fgColor='2F5496'),   # DEBE → azul oscuro
+        PatternFill('solid', fgColor='375623'),   # HABER → verde oscuro
+    ]
+    for _ci, (_h, _hf) in enumerate(zip(_as_header_labels, _as_col_fills), 1):
+        _cell = ws.cell(row=_as_header_row, column=_ci)
+        _cell.value = _h
+        _cell.font = header_font; _cell.fill = _hf
+        _cell.alignment = header_align; _cell.border = thin_border
+
+    _curr = _as_data_start
+    _desc_font = Font(bold=True, size=10)
+
+    if es_ventas:
+        # ═══════════════════════════════════════════════════════
+        # Asiento de VENTAS (FC − NC neteado)
+        # ═══════════════════════════════════════════════════════
+
+        # ── DEUDORES POR VENTAS → DEBE (col B), va primero ──
+        _deud_row = _curr
+        ws.cell(row=_deud_row, column=1).value = 'DEUDORES POR VENTAS'
+        ws.cell(row=_deud_row, column=1).font = Font(bold=True, size=11, color='1F3864')
+        _du = ws.cell(row=_deud_row, column=2)
+        _du.number_format = money_fmt; _du.alignment = center_align
+        _du.font = Font(bold=True, size=11)
+        _curr += 1
+
+        _haber_first = _curr
+
+        # ── Filas de Concepto (Neto) → HABER (col C) ──
+        for _, _rd in _conc_total.iterrows():
+            _desc_text = _rd['Desc'] or f"CONCEPTO {_rd['Concepto']}"
+            ws.cell(row=_curr, column=1).value = f"A {_desc_text}"
+            ws.cell(row=_curr, column=1).font = _desc_font
+            _hc = ws.cell(row=_curr, column=3)
+            _hc.value = float(_rd['_neto']); _hc.number_format = money_fmt; _hc.alignment = center_align
+            _curr += 1
+
+        # ── Fila IVA DEBITO → HABER ──
+        if _iva_total != 0:
+            ws.cell(row=_curr, column=1).value = 'A IVA DEBITO'
+            ws.cell(row=_curr, column=1).font = _desc_font
+            _ic = ws.cell(row=_curr, column=3)
+            _ic.value = _iva_total; _ic.number_format = money_fmt; _ic.alignment = center_align
+            _curr += 1
+
+        # ── Percepciones IIBB efectuadas → HABER (RET ignorado en ventas) ──
+        for _dn, _dv in _deducc_items:
+            _nu = _dn.upper()
+            if 'RET' in _nu and 'SIRCREB' not in _nu and 'SIRTAC' not in _nu:
+                continue  # las RET no se emiten en el asiento de ventas
+            ws.cell(row=_curr, column=1).value = f"A {_dn}"
+            ws.cell(row=_curr, column=1).font = _desc_font
+            _pc = ws.cell(row=_curr, column=3)
+            _pc.value = _dv; _pc.number_format = money_fmt; _pc.alignment = center_align
+            _curr += 1
+
+        _haber_last = _curr - 1
+
+        # Setear la fórmula de DEUDORES ahora que conocemos el rango HABER
+        if _haber_last >= _haber_first:
+            _du.value = f'=SUM(C{_haber_first}:C{_haber_last})'
+            # Doble subrayado de cierre en la última fila HABER
+            _last_haber_cell = ws.cell(row=_haber_last, column=3)
+            _last_haber_cell.border = Border(top=Side(style='thin'), bottom=Side(style='double'))
+        else:
+            _du.value = 0
+
+    else:
+        # ═══════════════════════════════════════════════════════
+        # Asiento de COMPRAS (lógica original)
+        # ═══════════════════════════════════════════════════════
+        # Identificar cuáles deducciones son RET fiscales
+        # SIRCREB, SIRTAC y retenciones bancarias (BCO/BANCO) quedan fuera:
+        # no son retenciones que vayan a DEUDORES POR VENTAS
+        _ret_fiscal_set = {
+            n for n, _ in _deducc_items
+            if 'RET' in n.upper()
+            and 'SIRCREB' not in n.upper()
+            and 'SIRTAC' not in n.upper()
+            and 'BCO' not in n.upper()
+            and 'BANCO' not in n.upper()
+        }
+
+        # ── Filas de Concepto (Neto) ──
+        for _, _rd in _conc_total.iterrows():
+            ws.cell(row=_curr, column=1).value = _rd['Desc'] or f"CONCEPTO {_rd['Concepto']}"
+            ws.cell(row=_curr, column=1).font = _desc_font
+            _dc = ws.cell(row=_curr, column=2)
+            _dc.value = float(_rd['_neto']); _dc.number_format = money_fmt; _dc.alignment = center_align
+            _curr += 1
+
+        # ── Fila IVA ──
+        if _iva_total != 0:
+            ws.cell(row=_curr, column=1).value = 'IVA'
+            ws.cell(row=_curr, column=1).font = _desc_font
+            _ic = ws.cell(row=_curr, column=2)
+            _ic.value = _iva_total; _ic.number_format = money_fmt; _ic.alignment = center_align
+            _curr += 1
+
+        # ── Filas de Deducciones (rastrear filas de RET fiscales) ──
+        _ret_fiscal_rows = []
+        for _dn, _dv in _deducc_items:
+            ws.cell(row=_curr, column=1).value = _dn
+            ws.cell(row=_curr, column=1).font = _desc_font
+            _dedcc = ws.cell(row=_curr, column=2)
+            _dedcc.value = _dv; _dedcc.number_format = money_fmt; _dedcc.alignment = center_align
+            if _dn in _ret_fiscal_set:
+                _ret_fiscal_rows.append(_curr)
+            _curr += 1
+
+        _last_debe_row = _curr - 1
+
+        # ── a PROVEEDORES (col C) = SUM(DEBE) - DEUDORES ── va primero
+        _prov_row = _curr
+        _pc = ws.cell(row=_prov_row, column=1)
+        _pc.value = 'a PROVEEDORES'
+        _pc.font = Font(bold=True, size=11, color='1F3864')
+        _deud_row = _prov_row + 1  # DEUDORES siempre está en la fila siguiente
+        _ph = ws.cell(row=_prov_row, column=3)
+        _ph.value = f'=SUM(B{_as_data_start}:B{_last_debe_row})-C{_deud_row}'
+        _ph.number_format = money_fmt; _ph.alignment = center_align
+        _ph.font = Font(bold=True, size=11)
+        _ph.border = Border(top=Side(style='thin'), bottom=Side(style='double'))
+        _curr += 1
+
+        # ── a DEUDORES POR VENTAS (col C) — fórmula de filas B específicas ──
+        _dd = ws.cell(row=_deud_row, column=1)
+        _dd.value = 'a DEUDORES POR VENTAS'
+        _dd.font = Font(bold=True, size=11, color='1F3864')
+        _dh = ws.cell(row=_deud_row, column=3)
+        if _ret_fiscal_rows:
+            _dh.value = '=' + '+'.join(f'B{r}' for r in _ret_fiscal_rows)
+        else:
+            _dh.value = 0
+        _dh.number_format = money_fmt; _dh.alignment = center_align
+        _dh.font = Font(bold=True, size=11)
+        _dh.border = Border(top=Side(style='thin'), bottom=Side(style='double'))
+        _curr += 1
+
+    # ═══════════════════════════════════════════════════════
+    # Asiento de Restitución (común a compras y ventas)
+    # Sólo si hay IVA de NCs en el período
+    # ═══════════════════════════════════════════════════════
+    if _nc_iva_total != 0:
+        # Fila separadora en blanco
+        _curr += 1
+
+        if es_ventas:
+            _titulo      = 'RESTITUCION DE DEBITO'
+            _label_debe  = 'DEBITO FISCAL IVA'
+            _label_haber = 'A CREDITO FISCAL IVA'
+        else:
+            _titulo      = 'RESTITUCION DE CREDITO'
+            _label_debe  = 'CREDITO FISCAL IVA'
+            _label_haber = 'A DEBITO FISCAL IVA'
+
+        # Título de sección
+        ws.cell(row=_curr, column=1).value = _titulo
+        ws.cell(row=_curr, column=1).font = Font(bold=True, size=11, color='C00000')
+        _curr += 1
+
+        # Fila DEBE
+        ws.cell(row=_curr, column=1).value = _label_debe
+        ws.cell(row=_curr, column=1).font = _desc_font
+        _rdc = ws.cell(row=_curr, column=2)
+        _rdc.value = _nc_iva_total
+        _rdc.number_format = money_fmt
+        _rdc.alignment = center_align
+        _restit_row = _curr
+        _curr += 1
+
+        # Fila HABER (= al DEBE para que se mantengan acoplados)
+        ws.cell(row=_curr, column=1).value = _label_haber
+        ws.cell(row=_curr, column=1).font = Font(bold=True, size=11, color='1F3864')
+        _rhc = ws.cell(row=_curr, column=3)
+        _rhc.value = f'=B{_restit_row}'
+        _rhc.number_format = money_fmt
+        _rhc.alignment = center_align
+        _rhc.font = Font(bold=True, size=11)
+        _rhc.border = Border(top=Side(style='thin'), bottom=Side(style='double'))
+
+    _autofit(ws, 3, start_row=_as_header_row)
+    ws.column_dimensions['A'].width = 38
+    ws.column_dimensions['B'].width = 20
+    ws.column_dimensions['C'].width = 20
 
 
 def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumenes=True, con_auxiliar=False, cruce_arca=False, df_arca=None, con_asiento=False):
@@ -1530,263 +1803,18 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
         # ── Hoja Asiento Contable ────────────────────────────────
         if con_asiento:
             es_ventas = 'VENTA' in (meta.get('tipo_reporte') or '').upper()
-
-            # --- Columnas de neto (base imponible) y de IVA ---
-            _as_neto_base_cols = [
-                c for c in IVA_COL_ORDER
-                if c.startswith('Neto') or c in ('Exento', 'Monotributo')
-            ]
-            _as_iva_cols = [c for c in IVA_COL_ORDER if c.startswith('IVA')]
-            _as_deducc_cols  = [c for c in other_cols if _es_deduccion(c)]
-            _as_individ_cols = [c for c in other_cols if not _es_deduccion(c)]
-            _as_all_neto_cols = _as_neto_base_cols + _as_individ_cols
-
-            # --- A. Neto por Concepto ---
-            if _as_all_neto_cols:
-                _conc_grp = df.groupby('Concepto')[_as_all_neto_cols].sum()
-                _conc_grp['_neto'] = _conc_grp.sum(axis=1)
-                _conc_total = _conc_grp[['_neto']].reset_index()
-                _conc_total = _conc_total[_conc_total['_neto'] != 0].copy()
-                _conc_total['Desc'] = _conc_total['Concepto'].apply(
-                    lambda x: CONCEPTOS_MAP.get(str(x), f'Concepto {x}').replace('°', 'o.').upper()
-                )
-                _conc_total['_num'] = pd.to_numeric(_conc_total['Concepto'], errors='coerce')
-                _conc_total = _conc_total.sort_values('_num').drop(columns='_num')
-            else:
-                _conc_total = pd.DataFrame(columns=['Concepto', '_neto', 'Desc'])
-
-            # --- B. IVA total ---
-            _iva_total = float(df[_as_iva_cols].sum().sum()) if _as_iva_cols else 0.0
-
-            # --- C. Deducciones en orden (solo las que tienen valor != 0) ---
-            _deducc_items = []
-            for _c in _as_deducc_cols:
-                _v = float(df[_c].sum())
-                if _v != 0:
-                    _deducc_items.append((_c, _v))
-
-            # --- D. IVA de NCs (para asiento de Restitución) ---
-            # NCs ya están negadas en df → abs() recupera el valor positivo
-            _nc_iva_total = (
-                abs(float(df.loc[df['Tipo'] == 'NC', _as_iva_cols].sum().sum()))
-                if _as_iva_cols else 0.0
-            )
-
-            # --- Crear hoja con encabezado común (compras y ventas) ---
             ws_as = writer.book.create_sheet('Asiento Contable')
-
-            # Filas 1-3: encabezado (razón social / tipo + título / CUIT + periodo)
-            ws_as.merge_cells('A1:C1')
-            ws_as['A1'] = meta['razon_social'].upper() if meta['razon_social'] else 'CONTRIBUYENTE'
-            ws_as['A1'].font = title_font
-            ws_as['A1'].fill = title_fill
-            ws_as['A1'].alignment = center_align
-
-            ws_as.merge_cells('A2:C2')
-            _tr_label = (
-                f"{meta['tipo_reporte'].upper()} - ASIENTO CONTABLE"
-                if meta['tipo_reporte'] else 'ASIENTO CONTABLE'
+            _estilos = {
+                'title_font': title_font, 'title_fill': title_fill,
+                'report_type_font': report_type_font,
+                'header_fill': header_fill, 'header_font': header_font,
+                'header_align': header_align,
+                'money_fmt': money_fmt, 'thin_border': thin_border,
+                'center_align': center_align,
+            }
+            _escribir_hoja_asiento_contable(
+                ws_as, df, meta, es_ventas, _estilos, IVA_COL_ORDER, other_cols
             )
-            ws_as['A2'] = _tr_label
-            ws_as['A2'].font = report_type_font
-            ws_as['A2'].alignment = center_align
-
-            ws_as.merge_cells('A3:C3')
-            ws_as['A3'] = f"CUIT: {meta['cuit_empresa']} | Periodo: {meta['periodo']}"
-            ws_as['A3'].font = Font(bold=True, size=11, color='2F5496')
-            ws_as['A3'].alignment = center_align
-
-            # Headers de columna en fila 5 (fila 4 separadora)
-            _as_header_row  = 5
-            _as_data_start  = 6
-            _as_header_labels = ['DESCRIPCIÓN', 'DEBE', 'HABER']
-            _as_col_fills = [
-                header_fill,                              # Descripción → azul
-                PatternFill('solid', fgColor='2F5496'),   # DEBE → azul oscuro
-                PatternFill('solid', fgColor='375623'),   # HABER → verde oscuro
-            ]
-            for _ci, (_h, _hf) in enumerate(zip(_as_header_labels, _as_col_fills), 1):
-                _cell = ws_as.cell(row=_as_header_row, column=_ci)
-                _cell.value = _h
-                _cell.font = header_font; _cell.fill = _hf
-                _cell.alignment = header_align; _cell.border = thin_border
-
-            _curr = _as_data_start
-            _desc_font = Font(bold=True, size=10)
-
-            if es_ventas:
-                # ═══════════════════════════════════════════════════════
-                # Asiento de VENTAS (FC − NC neteado)
-                # ═══════════════════════════════════════════════════════
-
-                # ── DEUDORES POR VENTAS → DEBE (col B), va primero ──
-                _deud_row = _curr
-                ws_as.cell(row=_deud_row, column=1).value = 'DEUDORES POR VENTAS'
-                ws_as.cell(row=_deud_row, column=1).font = Font(bold=True, size=11, color='1F3864')
-                _du = ws_as.cell(row=_deud_row, column=2)
-                _du.number_format = money_fmt; _du.alignment = center_align
-                _du.font = Font(bold=True, size=11)
-                _curr += 1
-
-                _haber_first = _curr
-
-                # ── Filas de Concepto (Neto) → HABER (col C) ──
-                for _, _rd in _conc_total.iterrows():
-                    _desc_text = _rd['Desc'] or f"CONCEPTO {_rd['Concepto']}"
-                    ws_as.cell(row=_curr, column=1).value = f"A {_desc_text}"
-                    ws_as.cell(row=_curr, column=1).font = _desc_font
-                    _hc = ws_as.cell(row=_curr, column=3)
-                    _hc.value = float(_rd['_neto']); _hc.number_format = money_fmt; _hc.alignment = center_align
-                    _curr += 1
-
-                # ── Fila IVA DEBITO → HABER ──
-                if _iva_total != 0:
-                    ws_as.cell(row=_curr, column=1).value = 'A IVA DEBITO'
-                    ws_as.cell(row=_curr, column=1).font = _desc_font
-                    _ic = ws_as.cell(row=_curr, column=3)
-                    _ic.value = _iva_total; _ic.number_format = money_fmt; _ic.alignment = center_align
-                    _curr += 1
-
-                # ── Percepciones IIBB efectuadas → HABER (RET ignorado en ventas) ──
-                for _dn, _dv in _deducc_items:
-                    _nu = _dn.upper()
-                    if 'RET' in _nu and 'SIRCREB' not in _nu and 'SIRTAC' not in _nu:
-                        continue  # las RET no se emiten en el asiento de ventas
-                    ws_as.cell(row=_curr, column=1).value = f"A {_dn}"
-                    ws_as.cell(row=_curr, column=1).font = _desc_font
-                    _pc = ws_as.cell(row=_curr, column=3)
-                    _pc.value = _dv; _pc.number_format = money_fmt; _pc.alignment = center_align
-                    _curr += 1
-
-                _haber_last = _curr - 1
-
-                # Setear la fórmula de DEUDORES ahora que conocemos el rango HABER
-                if _haber_last >= _haber_first:
-                    _du.value = f'=SUM(C{_haber_first}:C{_haber_last})'
-                    # Doble subrayado de cierre en la última fila HABER
-                    _last_haber_cell = ws_as.cell(row=_haber_last, column=3)
-                    _last_haber_cell.border = Border(top=Side(style='thin'), bottom=Side(style='double'))
-                else:
-                    _du.value = 0
-
-            else:
-                # ═══════════════════════════════════════════════════════
-                # Asiento de COMPRAS (lógica original)
-                # ═══════════════════════════════════════════════════════
-                # Identificar cuáles deducciones son RET fiscales
-                # SIRCREB, SIRTAC y retenciones bancarias (BCO/BANCO) quedan fuera:
-                # no son retenciones que vayan a DEUDORES POR VENTAS
-                _ret_fiscal_set = {
-                    n for n, _ in _deducc_items
-                    if 'RET' in n.upper()
-                    and 'SIRCREB' not in n.upper()
-                    and 'SIRTAC' not in n.upper()
-                    and 'BCO' not in n.upper()
-                    and 'BANCO' not in n.upper()
-                }
-
-                # ── Filas de Concepto (Neto) ──
-                for _, _rd in _conc_total.iterrows():
-                    ws_as.cell(row=_curr, column=1).value = _rd['Desc'] or f"CONCEPTO {_rd['Concepto']}"
-                    ws_as.cell(row=_curr, column=1).font = _desc_font
-                    _dc = ws_as.cell(row=_curr, column=2)
-                    _dc.value = float(_rd['_neto']); _dc.number_format = money_fmt; _dc.alignment = center_align
-                    _curr += 1
-
-                # ── Fila IVA ──
-                if _iva_total != 0:
-                    ws_as.cell(row=_curr, column=1).value = 'IVA'
-                    ws_as.cell(row=_curr, column=1).font = _desc_font
-                    _ic = ws_as.cell(row=_curr, column=2)
-                    _ic.value = _iva_total; _ic.number_format = money_fmt; _ic.alignment = center_align
-                    _curr += 1
-
-                # ── Filas de Deducciones (rastrear filas de RET fiscales) ──
-                _ret_fiscal_rows = []
-                for _dn, _dv in _deducc_items:
-                    ws_as.cell(row=_curr, column=1).value = _dn
-                    ws_as.cell(row=_curr, column=1).font = _desc_font
-                    _dedcc = ws_as.cell(row=_curr, column=2)
-                    _dedcc.value = _dv; _dedcc.number_format = money_fmt; _dedcc.alignment = center_align
-                    if _dn in _ret_fiscal_set:
-                        _ret_fiscal_rows.append(_curr)
-                    _curr += 1
-
-                _last_debe_row = _curr - 1
-
-                # ── a PROVEEDORES (col C) = SUM(DEBE) - DEUDORES ── va primero
-                _prov_row = _curr
-                _pc = ws_as.cell(row=_prov_row, column=1)
-                _pc.value = 'a PROVEEDORES'
-                _pc.font = Font(bold=True, size=11, color='1F3864')
-                _deud_row = _prov_row + 1  # DEUDORES siempre está en la fila siguiente
-                _ph = ws_as.cell(row=_prov_row, column=3)
-                _ph.value = f'=SUM(B{_as_data_start}:B{_last_debe_row})-C{_deud_row}'
-                _ph.number_format = money_fmt; _ph.alignment = center_align
-                _ph.font = Font(bold=True, size=11)
-                _ph.border = Border(top=Side(style='thin'), bottom=Side(style='double'))
-                _curr += 1
-
-                # ── a DEUDORES POR VENTAS (col C) — fórmula de filas B específicas ──
-                _dd = ws_as.cell(row=_deud_row, column=1)
-                _dd.value = 'a DEUDORES POR VENTAS'
-                _dd.font = Font(bold=True, size=11, color='1F3864')
-                _dh = ws_as.cell(row=_deud_row, column=3)
-                if _ret_fiscal_rows:
-                    _dh.value = '=' + '+'.join(f'B{r}' for r in _ret_fiscal_rows)
-                else:
-                    _dh.value = 0
-                _dh.number_format = money_fmt; _dh.alignment = center_align
-                _dh.font = Font(bold=True, size=11)
-                _dh.border = Border(top=Side(style='thin'), bottom=Side(style='double'))
-                _curr += 1
-
-            # ═══════════════════════════════════════════════════════
-            # Asiento de Restitución (común a compras y ventas)
-            # Sólo si hay IVA de NCs en el período
-            # ═══════════════════════════════════════════════════════
-            if _nc_iva_total != 0:
-                # Fila separadora en blanco
-                _curr += 1
-
-                if es_ventas:
-                    _titulo      = 'RESTITUCION DE DEBITO'
-                    _label_debe  = 'CREDITO FISCAL IVA'
-                    _label_haber = 'A DEBITO FISCAL IVA'
-                else:
-                    _titulo      = 'RESTITUCION DE CREDITO'
-                    _label_debe  = 'DEBITO FISCAL IVA'
-                    _label_haber = 'A CREDITO FISCAL IVA'
-
-                # Título de sección
-                ws_as.cell(row=_curr, column=1).value = _titulo
-                ws_as.cell(row=_curr, column=1).font = Font(bold=True, size=11, color='C00000')
-                _curr += 1
-
-                # Fila DEBE
-                ws_as.cell(row=_curr, column=1).value = _label_debe
-                ws_as.cell(row=_curr, column=1).font = _desc_font
-                _rdc = ws_as.cell(row=_curr, column=2)
-                _rdc.value = _nc_iva_total
-                _rdc.number_format = money_fmt
-                _rdc.alignment = center_align
-                _restit_row = _curr
-                _curr += 1
-
-                # Fila HABER (= al DEBE para que se mantengan acoplados)
-                ws_as.cell(row=_curr, column=1).value = _label_haber
-                ws_as.cell(row=_curr, column=1).font = Font(bold=True, size=11, color='1F3864')
-                _rhc = ws_as.cell(row=_curr, column=3)
-                _rhc.value = f'=B{_restit_row}'
-                _rhc.number_format = money_fmt
-                _rhc.alignment = center_align
-                _rhc.font = Font(bold=True, size=11)
-                _rhc.border = Border(top=Side(style='thin'), bottom=Side(style='double'))
-
-            _autofit(ws_as, 3, start_row=_as_header_row)
-            ws_as.column_dimensions['A'].width = 38
-            ws_as.column_dimensions['B'].width = 20
-            ws_as.column_dimensions['C'].width = 20
 
 
 
@@ -2000,6 +2028,254 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
                     _autofit(ws_falt, n_falt_cols)
 
     print(f"\n  Excel guardado en: {output_path}")
+
+
+# ──────────────────────────────────────────────────────────────
+#  Asiento Contable Anualizado (TXT anual + XLS Mendez → 12 hojas)
+# ──────────────────────────────────────────────────────────────
+
+_TC_NORMALIZE_MENDEZ = {'FCE': 'FC', 'NCE': 'NC', 'NDE': 'ND', 'Liq': 'Li'}
+
+_NOMBRES_MES = [
+    '', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+    'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'
+]
+
+
+def _clave_cruce_mendez_desde_txt(t: dict) -> str:
+    """Construye clave `{Tipo}|{PV_int}|{Nro_int}|{CUIT_sin_guiones}` desde una transaccion del TXT."""
+    numero_raw = t['Numero']
+    pv_txt = numero_raw.split('-')[0] if '-' in numero_raw else numero_raw[:5]
+    resto_num = numero_raw.split('-')[1] if '-' in numero_raw else numero_raw[5:]
+    nro_txt = resto_num[:-1] if resto_num and resto_num[-1].isalpha() else resto_num
+    cuit_txt = (t.get('CUIT') or '').replace('-', '').strip()
+    try:
+        pv_norm = str(int(pv_txt))
+    except ValueError:
+        pv_norm = pv_txt
+    try:
+        nro_norm = str(int(nro_txt))
+    except ValueError:
+        nro_norm = nro_txt
+    return f"{t['Tipo']}|{pv_norm}|{nro_norm}|{cuit_txt}"
+
+
+def _clave_cruce_mendez_desde_xls(tc_raw, numero_raw, cuit_raw) -> str:
+    """Construye la misma clave desde una fila del Excel Mendez."""
+    tc = str(tc_raw or '').strip()
+    tc = _TC_NORMALIZE_MENDEZ.get(tc, tc)
+    numero = str(numero_raw or '').strip()
+    cuit = str(cuit_raw or '').replace('-', '').replace('.', '').strip()
+
+    if '-' in numero:
+        parts = numero.split('-', 1)
+        pv_raw, nro_raw = parts[0], parts[1]
+    elif '/' in numero:
+        parts = numero.split('/', 1)
+        pv_raw, nro_raw = parts[0], parts[1]
+    else:
+        pv_raw = numero[:5] if len(numero) >= 5 else numero
+        nro_raw = numero[5:] if len(numero) > 5 else ''
+
+    nro_clean = re.sub(r'[/A-Za-z]+$', '', nro_raw).strip()
+    try:
+        pv_norm = str(int(pv_raw))
+    except ValueError:
+        pv_norm = pv_raw
+    try:
+        nro_norm = str(int(nro_clean))
+    except ValueError:
+        nro_norm = nro_clean
+    return f"{tc}|{pv_norm}|{nro_norm}|{cuit}"
+
+
+def asignar_mes_por_xls_mendez(transacciones: list[dict], xls_source) -> tuple[list[dict], list[dict]]:
+    """Cruza cada transaccion del TXT contra el Excel Mendez y le asigna mes/anio.
+
+    `xls_source` puede ser una ruta o un BytesIO con el contenido del .xls.
+    Devuelve (con_mes, sin_mes). Cada transaccion en `con_mes` recibe los campos
+    t['Mes'] (int 1-12) y t['Anio'] (int). Las que no cruzan van a `sin_mes` sin
+    esos campos.
+    """
+    try:
+        df_xls = pd.read_excel(xls_source, engine='xlrd')
+    except Exception:
+        df_xls = pd.read_excel(xls_source)
+
+    cols_lower = {c.lower().strip(): c for c in df_xls.columns}
+    def _col(*nombres):
+        for n in nombres:
+            if n.lower() in cols_lower:
+                return cols_lower[n.lower()]
+        return None
+    col_fecha  = _col('Fecha')
+    col_tc     = _col('TC', 'Tipo')
+    col_numero = _col('Numero', 'Número', 'N° Comprobante')
+    col_cuit   = _col('C.U.I.T.', 'CUIT')
+    if not all([col_fecha, col_tc, col_numero, col_cuit]):
+        faltan = [n for n, v in [('Fecha', col_fecha), ('TC', col_tc),
+                                  ('Numero', col_numero), ('C.U.I.T.', col_cuit)] if not v]
+        raise ValueError(f"El XLS Mendez no tiene las columnas esperadas: faltan {faltan}")
+
+    fecha_por_clave: dict[str, tuple[int, int]] = {}
+    # Lookup auxiliar sin CUIT (lista de hits para detectar ambiguedad)
+    fecha_por_pv_nro: dict[str, list[tuple[int, int]]] = {}
+    for _, row in df_xls.iterrows():
+        fecha_raw = row[col_fecha]
+        if pd.isna(fecha_raw):
+            continue
+        fecha_str = str(fecha_raw).strip()
+        m = re.match(r'(\d{1,2})/(\d{1,2})/(\d{4})', fecha_str)
+        if not m:
+            try:
+                fecha_dt = pd.to_datetime(fecha_raw, dayfirst=True, errors='coerce')
+                if pd.isna(fecha_dt):
+                    continue
+                mes, anio = int(fecha_dt.month), int(fecha_dt.year)
+            except Exception:
+                continue
+        else:
+            mes, anio = int(m.group(2)), int(m.group(3))
+        clave = _clave_cruce_mendez_desde_xls(row[col_tc], row[col_numero], row[col_cuit])
+        fecha_por_clave.setdefault(clave, (mes, anio))
+        # Clave corta (sin CUIT) para fallback ante CUIT corrupto en el TXT
+        clave_corta = '|'.join(clave.split('|')[:3])
+        fecha_por_pv_nro.setdefault(clave_corta, []).append((mes, anio))
+
+    con_mes, sin_mes = [], []
+    for t in transacciones:
+        clave = _clave_cruce_mendez_desde_txt(t)
+        if clave in fecha_por_clave:
+            mes, anio = fecha_por_clave[clave]
+        else:
+            # Fallback: si el CUIT del TXT esta vacio o corrupto, probar sin CUIT
+            cuit_txt = (t.get('CUIT') or '').replace('-', '').strip()
+            if not cuit_txt:
+                clave_corta = '|'.join(clave.split('|')[:3])
+                hits = fecha_por_pv_nro.get(clave_corta, [])
+                if len(hits) == 1:
+                    mes, anio = hits[0]
+                else:
+                    sin_mes.append(t)
+                    continue
+            else:
+                sin_mes.append(t)
+                continue
+        t['Mes'] = mes
+        t['Anio'] = anio
+        con_mes.append(t)
+    return con_mes, sin_mes
+
+
+def _ultimo_dia_mes(anio: int, mes: int) -> int:
+    import calendar
+    return calendar.monthrange(anio, mes)[1]
+
+
+def crear_excel_asiento_anual(transacciones_con_mes: list[dict],
+                               transacciones_sin_mes: list[dict],
+                               meta: dict, output_path) -> dict:
+    """Genera un .xlsx con una hoja `Asiento {Mes}` por cada mes presente.
+
+    Si `transacciones_sin_mes` no esta vacio, agrega una hoja `Sin Asignar`
+    con el detalle de las transacciones que no cruzaron contra el XLS Mendez.
+    Devuelve un dict con estadisticas: {'meses': [1..12 presentes], 'sin_asignar': N}.
+    """
+    es_ventas = 'VENTA' in (meta.get('tipo_reporte') or '').upper()
+
+    por_mes: dict[int, list[dict]] = {}
+    anio_dominante: dict[int, int] = {}
+    for t in transacciones_con_mes:
+        m = int(t['Mes'])
+        por_mes.setdefault(m, []).append(t)
+        anio_dominante[m] = int(t.get('Anio') or 0)
+
+    meses_ordenados = sorted(por_mes.keys())
+
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)  # quitar la hoja por defecto
+
+    title_font       = Font(bold=True, size=14, color='FFFFFF')
+    title_fill       = PatternFill('solid', fgColor='2F5496')
+    report_type_font = Font(bold=True, size=12, color='C00000')
+    header_font      = Font(bold=True, size=10, color='FFFFFF')
+    header_fill      = PatternFill('solid', fgColor='4472C4')
+    header_align     = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    center_align     = Alignment(horizontal='center', vertical='center')
+    thin_border      = Border(
+        left=Side(style='thin'), right=Side(style='thin'),
+        top=Side(style='thin'), bottom=Side(style='thin')
+    )
+    money_fmt = '$#,##0.00'
+
+    estilos = {
+        'title_font': title_font, 'title_fill': title_fill,
+        'report_type_font': report_type_font,
+        'header_fill': header_fill, 'header_font': header_font,
+        'header_align': header_align,
+        'money_fmt': money_fmt, 'thin_border': thin_border,
+        'center_align': center_align,
+    }
+
+    for mes in meses_ordenados:
+        anio = anio_dominante.get(mes) or 0
+        ultimo = _ultimo_dia_mes(anio, mes) if anio else 31
+        periodo_mes = (
+            f"Desde el 01/{mes:02d}/{anio} hasta el {ultimo:02d}/{mes:02d}/{anio}"
+            if anio else f"Mes {mes:02d}"
+        )
+        meta_mes = dict(meta)
+        meta_mes['periodo'] = periodo_mes
+
+        filas, iva_col_order, other_cols, _ = _construir_filas_consolidado(por_mes[mes], meta_mes)
+        if not filas:
+            continue
+        df_mes = pd.DataFrame(filas)
+
+        nombre_hoja = f"Asiento {_NOMBRES_MES[mes]}"
+        ws = wb.create_sheet(nombre_hoja)
+        _escribir_hoja_asiento_contable(ws, df_mes, meta_mes, es_ventas, estilos, iva_col_order, other_cols)
+
+    if transacciones_sin_mes:
+        ws_sa = wb.create_sheet('Sin Asignar')
+        ws_sa.merge_cells('A1:H1')
+        ws_sa['A1'] = (
+            f"⚠ {len(transacciones_sin_mes)} comprobantes del TXT no se cruzaron "
+            f"con el XLS Mendez — revisar manualmente."
+        )
+        ws_sa['A1'].font = Font(bold=True, size=12, color='FFFFFF')
+        ws_sa['A1'].fill = PatternFill('solid', fgColor='C00000')
+        ws_sa['A1'].alignment = center_align
+
+        headers_sa = ['Dia', 'Tipo', 'Numero', 'CUIT', 'Proveedor', 'Concepto', 'Letra', 'Total']
+        for ci, h in enumerate(headers_sa, 1):
+            c = ws_sa.cell(row=3, column=ci, value=h)
+            c.font = header_font; c.fill = header_fill
+            c.alignment = header_align; c.border = thin_border
+
+        for ri, t in enumerate(transacciones_sin_mes, 4):
+            ws_sa.cell(row=ri, column=1, value=t.get('Fecha'))
+            ws_sa.cell(row=ri, column=2, value=t.get('Tipo'))
+            ws_sa.cell(row=ri, column=3, value=t.get('Numero'))
+            ws_sa.cell(row=ri, column=4, value=t.get('CUIT'))
+            ws_sa.cell(row=ri, column=5, value=t.get('Proveedor'))
+            ws_sa.cell(row=ri, column=6, value=t.get('Concepto'))
+            ws_sa.cell(row=ri, column=7, value=t.get('Letra'))
+            total_cell = ws_sa.cell(row=ri, column=8, value=float(t.get('Total') or 0))
+            total_cell.number_format = money_fmt
+        _autofit(ws_sa, 8, start_row=3)
+
+    if not wb.sheetnames:
+        ws_empty = wb.create_sheet('Sin Datos')
+        ws_empty['A1'] = 'No se generaron asientos: ninguna transaccion cruzo contra el XLS Mendez.'
+        ws_empty['A1'].font = Font(bold=True, size=12, color='C00000')
+
+    wb.save(output_path)
+    return {
+        'meses': meses_ordenados,
+        'sin_asignar': len(transacciones_sin_mes),
+        'con_mes': len(transacciones_con_mes),
+    }
 
 
 def crear_excel_consolidado_simple(transacciones: list[dict], meta: dict, output_path):

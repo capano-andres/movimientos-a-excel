@@ -24,7 +24,7 @@ def _patched_sheet_init(self, *args, **kwargs):
     self.utter_max_rows = 1048576
 _xlrd_sheet.Sheet.__init__ = _patched_sheet_init
 
-from extractor_movimientos import parsear_archivo, crear_excel, crear_excel_consolidado_simple, generar_sifere_txt, generar_sifere_retenciones_txt, generar_percepciones_arba, generar_arba_desde_excel, generar_retenciones_arba, generar_retenciones_arba_desde_excel, construir_sistema_aux_set, CONCEPTOS_MAP, normalizar_csv_ventas_arca, consolidar_ventas_citi, generar_citi_ventas_lineas, generar_citi_alicuotas_lineas, crear_excel_ventas_citi, parsear_arca_retenciones_xls, transformar_retenciones_a_csv_arca, generar_zip_retenciones_arca
+from extractor_movimientos import parsear_archivo, crear_excel, crear_excel_consolidado_simple, generar_sifere_txt, generar_sifere_retenciones_txt, generar_percepciones_arba, generar_arba_desde_excel, generar_retenciones_arba, generar_retenciones_arba_desde_excel, construir_sistema_aux_set, CONCEPTOS_MAP, normalizar_csv_ventas_arca, consolidar_ventas_citi, generar_citi_ventas_lineas, generar_citi_alicuotas_lineas, crear_excel_ventas_citi, parsear_arca_retenciones_xls, transformar_retenciones_a_csv_arca, generar_zip_retenciones_arca, asignar_mes_por_xls_mendez, crear_excel_asiento_anual
 
 @st.cache_data(show_spinner=False)
 def obtener_razon_social_cuitonline(cuit):
@@ -896,10 +896,11 @@ if herramienta == TOOL_MOVIMIENTOS:
         OPT_RESUMENES = "Incluir hojas de resumen"
         OPT_ARCA = "Cruce de comprobantes con ARCA"
         OPT_ASIENTO = "Asiento Contable"
+        OPT_ASIENTO_ANUAL = "Asiento Contable Anualizado (1 hoja x mes)"
 
         modo_export = st.radio(
             "Seleccioná el modo de exportación:",
-            options=[OPT_SOLO, OPT_AUXILIAR, OPT_RESUMENES, OPT_ARCA, OPT_ASIENTO],
+            options=[OPT_SOLO, OPT_AUXILIAR, OPT_RESUMENES, OPT_ARCA, OPT_ASIENTO, OPT_ASIENTO_ANUAL],
             index=0,
             help="Solo se puede elegir una opción a la vez."
         )
@@ -907,6 +908,7 @@ if herramienta == TOOL_MOVIMIENTOS:
         con_resumenes = modo_export == OPT_RESUMENES
         cruce_arca    = modo_export == OPT_ARCA
         con_asiento   = modo_export == OPT_ASIENTO
+        asiento_anual = modo_export == OPT_ASIENTO_ANUAL
         st.markdown('</div>', unsafe_allow_html=True)
 
         # ─── Card 02b: Archivo ARCA (condicional) ──────────────────────────────────────
@@ -1091,6 +1093,26 @@ if herramienta == TOOL_MOVIMIENTOS:
                 st.info("Subí el archivo .zip de ARCA para continuar")
             st.markdown('</div>', unsafe_allow_html=True)
 
+        # ─── Card 02c: Excel del Sistema Mendez (condicional al modo Anualizado) ─────
+        xls_mendez_bytes = None
+        xls_mendez_name = None
+        if asiento_anual:
+            st.markdown('<div class="card"><div class="card-label">02c · Excel del Sistema Mendez (.XLS)</div>', unsafe_allow_html=True)
+            uploaded_mendez = st.file_uploader(
+                "Subí el .XLS del sistema Mendez con las fechas completas por comprobante",
+                type=["xls", "xlsx"],
+                label_visibility="visible",
+                key="mendez_xls",
+                help="El TXT anual sólo trae el día; el XLS aporta mes/año por cruce de Tipo+PV+Nro+CUIT."
+            )
+            if uploaded_mendez:
+                xls_mendez_bytes = uploaded_mendez.getvalue()
+                xls_mendez_name = uploaded_mendez.name
+                st.success(f"**{xls_mendez_name}** listo para cruzar")
+            else:
+                st.info("Subí el .XLS de Mendez para continuar")
+            st.markdown('</div>', unsafe_allow_html=True)
+
 
         if uploaded_file is not None:
             filename = Path(uploaded_file.name).stem
@@ -1106,15 +1128,28 @@ if herramienta == TOOL_MOVIMIENTOS:
 
                     if not transacciones:
                         st.error("No se encontraron transacciones. Verificá el formato del archivo.")
+                    elif asiento_anual and xls_mendez_bytes is None:
+                        st.error("Subí el .XLS de Mendez para poder discriminar los meses.")
                     else:
                         with st.spinner("Generando Excel..."):
                             output = io.BytesIO()
-                            crear_excel(transacciones, meta, output,
-                                        con_resumenes=con_resumenes,
-                                        con_auxiliar=con_auxiliar,
-                                        cruce_arca=cruce_arca,
-                                        df_arca=df_arca,
-                                        con_asiento=con_asiento)
+                            if asiento_anual:
+                                con_mes, sin_mes = asignar_mes_por_xls_mendez(
+                                    transacciones, io.BytesIO(xls_mendez_bytes)
+                                )
+                                stats_anual = crear_excel_asiento_anual(con_mes, sin_mes, meta, output)
+                                if stats_anual['sin_asignar'] > 0:
+                                    st.warning(
+                                        f"⚠ {stats_anual['sin_asignar']} comprobantes no se cruzaron "
+                                        f"con el XLS Mendez — se volcaron en la hoja 'Sin Asignar'."
+                                    )
+                            else:
+                                crear_excel(transacciones, meta, output,
+                                            con_resumenes=con_resumenes,
+                                            con_auxiliar=con_auxiliar,
+                                            cruce_arca=cruce_arca,
+                                            df_arca=df_arca,
+                                            con_asiento=con_asiento)
                             output.seek(0)
 
                         st.success("✓  Proceso completado con éxito")
@@ -1151,6 +1186,8 @@ if herramienta == TOOL_MOVIMIENTOS:
 
                         if cruce_arca:
                             excel_filename = "Cruce Compras.xlsx"
+                        elif asiento_anual:
+                            excel_filename = f"{filename}_asiento_anual.xlsx"
                         elif con_asiento:
                             excel_filename = f"{filename}_asiento.xlsx"
                         else:

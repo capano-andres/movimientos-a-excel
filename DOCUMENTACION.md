@@ -493,12 +493,12 @@ Las filas RET no se emiten en modo ventas porque no son típicas de un libro de 
 Después del asiento principal, **sólo si el período tiene IVA de NCs**, se agrega un segundo asiento que contabiliza la restitución del IVA correspondiente a las Notas de Crédito. El IVA de NCs se calcula como `abs(SUM(IVA))` filtrando filas con `Tipo == 'NC'`.
 
 **Modo Ventas** — `RESTITUCION DE DEBITO`:
-- DEBE: `CREDITO FISCAL IVA` = `abs(IVA NCs)`.
-- HABER: `A DEBITO FISCAL IVA` con fórmula `=B{restit_row}` para que ambos importes queden acoplados ante ediciones manuales.
+- DEBE: `DEBITO FISCAL IVA` = `abs(IVA NCs)`.
+- HABER: `A CREDITO FISCAL IVA` con fórmula `=B{restit_row}` para que ambos importes queden acoplados ante ediciones manuales.
 
 **Modo Compras** — `RESTITUCION DE CREDITO`:
-- DEBE: `DEBITO FISCAL IVA` = `abs(IVA NCs)`.
-- HABER: `A CREDITO FISCAL IVA` con la misma fórmula `=B{restit_row}`.
+- DEBE: `CREDITO FISCAL IVA` = `abs(IVA NCs)`.
+- HABER: `A DEBITO FISCAL IVA` con la misma fórmula `=B{restit_row}`.
 
 Si no hay NCs en el período, el bloque de Restitución no se escribe.
 
