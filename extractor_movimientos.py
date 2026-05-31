@@ -4117,20 +4117,25 @@ def _str_int_safe(val) -> str:
     return s
 
 
-def transformar_retenciones_a_csv_arca(df: pd.DataFrame):
+def transformar_retenciones_a_csv_arca(df: pd.DataFrame, tipo_cbte_positivo: str = '99'):
     """Transforma el DataFrame del XLS ARCA al CSV formato Portal IVA.
 
     Aplica el mapeo de la hoja "FORMULA PARA IMPORTAR RETENCION" del template:
       - Fecha de Emisión = Fecha Ret./Perc. reformateada YYYY-MM-DD
-      - Tipo Cbte = 99 (constante)
+      - Tipo Cbte = `tipo_cbte_positivo` (seleccionable desde la UI, default '99')
+        para importes positivos; '3' (Nota de Crédito A) para importes negativos.
       - PV = primeros 2 chars del Número Certificado
       - Nro = últimos 8 chars del Número Certificado
       - Tipo Doc Vend = 80 (constante, CUIT)
       - Nro Doc = CUIT Agente Ret./Perc.
       - Denominación = Denominación o Razón Social
-      - Importe Total = Importe Ret./Perc.
+      - Importe Total = Importe Ret./Perc. (en valor absoluto si es NC)
       - Moneda = PES, TC = 1
       - Importe de Per. o Pagos a Cta. de Otros Imp. Nac. = Importe Ret./Perc.
+
+    Notas de Crédito: igual que el CSV real del Portal IVA Compras, el importe se
+    emite siempre POSITIVO y la NC se distingue por el código de Tipo de
+    Comprobante ('3'), no por el signo.
 
     Devuelve (csv_text, periodo_yyyymm) donde periodo_yyyymm es el mes/año más
     frecuente de Fecha Ret./Perc.
@@ -4151,11 +4156,17 @@ def transformar_retenciones_a_csv_arca(df: pd.DataFrame):
         denom = src['Denominación o Razón Social']
         denom_s = '' if (denom is None or (isinstance(denom, float) and pd.isna(denom))) else str(denom).strip()
 
-        importe_s = _fmt_importe_arg(src['Importe Ret./Perc.'])
+        # Importe negativo → Nota de Crédito: tipo '3' e importe en valor absoluto
+        # (el Portal IVA Compras distingue la NC por el tipo, no por el signo).
+        imp_raw = src['Importe Ret./Perc.']
+        imp_val = None if (imp_raw is None or (isinstance(imp_raw, float) and pd.isna(imp_raw))) else float(imp_raw)
+        es_nc = imp_val is not None and imp_val < 0
+        tipo_cbte = '3' if es_nc else tipo_cbte_positivo
+        importe_s = _fmt_importe_arg(abs(imp_val) if imp_val is not None else None)
 
         rows.append([
             fecha_iso,    # 1  Fecha de Emisión
-            '1',          # 2  Tipo de Comprobante (Factura A → Mendez infiere Cond IVA = RI)
+            tipo_cbte,    # 2  Tipo de Comprobante (positivo: 80/99 seleccionable · NC: '3')
             cert_s[:2],   # 3  Punto de Venta
             cert_s[-8:],  # 4  Número de Comprobante
             '80',         # 5  Tipo Doc. Vendedor

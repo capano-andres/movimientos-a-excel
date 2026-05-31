@@ -5558,6 +5558,21 @@ elif herramienta == TOOL_IMPORTACION:
                 return c
         return None
 
+    def _find_col_imp(df, keywords):
+        """Primera columna cuyo header (lower) contiene todas las keywords."""
+        for c in df.columns:
+            cl = c.strip().lower()
+            if all(k in cl for k in keywords):
+                return c
+        return None
+
+    def _parse_monto_imp(serie):
+        """Serie de strings formato argentino ('1.234,56') → float (NaN si vacío)."""
+        return pd.to_numeric(
+            serie.astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False),
+            errors='coerce',
+        )
+
     st.markdown('<div class="card"><div class="card-label">01 · Archivo TXT Mendez</div>', unsafe_allow_html=True)
     uploaded_txt_imp = st.file_uploader(
         "Subí el TXT/PRN de movimientos del sistema Mendez",
@@ -5636,6 +5651,40 @@ elif herramienta == TOOL_IMPORTACION:
                 )
                 df_arca_raw['_concepto'] = df_arca_raw['_cuit_norm'].map(concepto_por_cuit)
 
+                # ── Verificación: Importe Total NO debe coincidir con un Neto Gravado ──
+                # (síntoma de IVA no sumado al cargar el comprobante). Solo avisa.
+                df_flagged = pd.DataFrame()
+                col_total = _find_col_imp(df_arca_raw, ['importe', 'total'])
+                netos_chequear = [
+                    ('10,5%', _find_col_imp(df_arca_raw, ['neto', 'gravado', '10,5'])),
+                    ('21%', _find_col_imp(df_arca_raw, ['neto', 'gravado', '21'])),
+                    ('27%', _find_col_imp(df_arca_raw, ['neto', 'gravado', '27'])),
+                ]
+                netos_chequear = [(al, c) for al, c in netos_chequear if c is not None]
+                if col_total is not None and netos_chequear:
+                    total_num = _parse_monto_imp(df_arca_raw[col_total])
+                    alic_match = pd.Series([''] * len(df_arca_raw), index=df_arca_raw.index)
+                    neto_match = pd.Series([float('nan')] * len(df_arca_raw), index=df_arca_raw.index)
+                    flag_mask = pd.Series(False, index=df_arca_raw.index)
+                    for alic, col in netos_chequear:
+                        neto_num = _parse_monto_imp(df_arca_raw[col])
+                        coincide = (total_num > 0) & (neto_num > 0) & ((total_num - neto_num).abs() < 0.01)
+                        nuevos = coincide & (~flag_mask)
+                        alic_match.loc[nuevos] = alic
+                        neto_match.loc[nuevos] = neto_num.loc[nuevos]
+                        flag_mask = flag_mask | coincide
+                    if flag_mask.any():
+                        cols_id = []
+                        for kws in (['tipo', 'comprobante'], ['punto', 'venta'], ['mero', 'comprobante'], ['denominaci']):
+                            c = _find_col_imp(df_arca_raw, kws)
+                            if c is not None and c not in cols_id:
+                                cols_id.append(c)
+                        if cuit_col_arca not in cols_id:
+                            cols_id.append(cuit_col_arca)
+                        df_flagged = df_arca_raw.loc[flag_mask, cols_id + [col_total]].copy()
+                        df_flagged['Alícuota Neto'] = alic_match.loc[flag_mask].values
+                        df_flagged['Neto Gravado'] = neto_match.loc[flag_mask].values
+
                 prefijo_zip = _prefijo_desde_zip(uploaded_arca_imp.name)
 
                 container_buf = io.BytesIO()
@@ -5683,6 +5732,14 @@ elif herramienta == TOOL_IMPORTACION:
                     f"{total_cruzados}/{total_arca} comprobantes cruzados · "
                     f"{total_sin} sin concepto"
                 )
+
+                if not df_flagged.empty:
+                    st.warning(
+                        f"⚠ {len(df_flagged)} comprobante(s) con Importe Total = Neto Gravado "
+                        f"(IVA no sumado · revisar carga del contribuyente)"
+                    )
+                    with st.expander("Comprobantes con posible error de carga", expanded=True):
+                        st.dataframe(df_flagged, use_container_width=True, hide_index=True)
 
                 stats_df = pd.DataFrame(stats_rows).sort_values(by='Comprobantes', ascending=False)
                 with st.expander("Detalle de ZIPs generados", expanded=True):
@@ -5869,11 +5926,21 @@ elif herramienta == TOOL_RETENCIONES:
         horizontal=True,
         key="ret_tipo",
     )
-    # Si cambia el tipo, limpiar resultados previos para no mostrar descargas viejas
-    if st.session_state.get('ret_last_tipo') != tipo_ret:
+    tipo_cbte_pos = st.radio(
+        "Tipo de Comprobante (importes positivos):",
+        options=["99", "80"],
+        horizontal=True,
+        key="ret_tipo_cbte",
+        help="Los importes negativos se emiten siempre como Nota de Crédito (tipo 3).",
+    )
+    # Si cambia el tipo de retención o el tipo de comprobante, limpiar resultados
+    # previos para no mostrar descargas viejas.
+    if (st.session_state.get('ret_last_tipo') != tipo_ret
+            or st.session_state.get('ret_last_tipo_cbte') != tipo_cbte_pos):
         for k in ('ret_zip_bytes', 'ret_zip_name', 'ret_count', 'ret_periodo', 'ret_tipo_generado'):
             st.session_state.pop(k, None)
         st.session_state['ret_last_tipo'] = tipo_ret
+        st.session_state['ret_last_tipo_cbte'] = tipo_cbte_pos
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown(f'<div class="card"><div class="card-label">02 · Archivo {tipo_ret} (.xls / .xlsx)</div>', unsafe_allow_html=True)
@@ -5893,7 +5960,7 @@ elif herramienta == TOOL_RETENCIONES:
             try:
                 with st.spinner(f"Procesando retenciones de {tipo_ret}..."):
                     df = parsear_arca_retenciones_xls(uploaded_ret.getvalue())
-                    csv_text, periodo = transformar_retenciones_a_csv_arca(df)
+                    csv_text, periodo = transformar_retenciones_a_csv_arca(df, tipo_cbte_pos)
                     zip_bytes, zip_name = generar_zip_retenciones_arca(csv_text, periodo)
                     st.session_state['ret_zip_bytes'] = zip_bytes
                     st.session_state['ret_zip_name'] = zip_name
@@ -5906,6 +5973,7 @@ elif herramienta == TOOL_RETENCIONES:
                     f'<div class="stats-row">'
                     f'<div class="stat-chip"><div class="stat-val">{len(df)}</div><div class="stat-lbl">RET. {tipo_ret.upper()}</div></div>'
                     f'<div class="stat-chip"><div class="stat-val">{periodo}</div><div class="stat-lbl">PERIODO</div></div>'
+                    f'<div class="stat-chip"><div class="stat-val">{tipo_cbte_pos}</div><div class="stat-lbl">TIPO CBTE</div></div>'
                     f'</div>',
                     unsafe_allow_html=True,
                 )

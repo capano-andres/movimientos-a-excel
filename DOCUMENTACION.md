@@ -1036,6 +1036,7 @@ El código de concepto se toma de la columna `Concepto` de las transacciones del
 
 - Mensaje de éxito con cantidad de ZIPs generados, comprobantes cruzados y comprobantes sin concepto.
 - Tabla expandible con la lista de Conceptos detectados y la cantidad de comprobantes en cada uno.
+- **Advertencia de carga**: verifica que el `Importe Total` de cada comprobante **no coincida** con su `Neto Gravado IVA 10,5% / 21% / 27%` (síntoma de que el contribuyente cargó el comprobante sin sumar el IVA al neto). Si detecta alguno, muestra un `st.warning` + tabla expandible con esos comprobantes (Tipo, PV, Número, CUIT, Denominación, Importe Total, alícuota y Neto que coincidió). **No bloquea** la generación: los ZIPs igual se arman. Solo marca filas con `Neto > 0`, así los comprobantes exentos / no gravados no generan falsos positivos.
 - Botón único de descarga del `.zip` contenedor.
 
 > [!IMPORTANT]
@@ -1198,7 +1199,7 @@ Convierte los XLS de **"Mis Retenciones/Percepciones"** de ARCA en un `.zip` con
 
 **Problema que resuelve:**
 
-El sistema Mendez importa las retenciones de IVA y Ganancias del régimen SICORE como si fueran comprobantes del Portal IVA, lo que requiere transformar los XLS de ARCA al formato de 32 columnas del Portal IVA (con `Tipo Cbte = 99`, fechas en `YYYY-MM-DD`, importe argentino, encoding `latin-1`, etc.). Esa transformación se hacía con un Excel macro/fórmulas — la herramienta la automatiza partiendo del XLS tal cual lo baja el contribuyente.
+El sistema Mendez importa las retenciones de IVA y Ganancias del régimen SICORE como si fueran comprobantes del Portal IVA, lo que requiere transformar los XLS de ARCA al formato de 32 columnas del Portal IVA (con `Tipo Cbte` seleccionable `80`/`99` —default `99`— para importes positivos y `Tipo Cbte = 3` para importes negativos tratados como Nota de Crédito, fechas en `YYYY-MM-DD`, importe argentino, encoding `latin-1`, etc.). Esa transformación se hacía con un Excel macro/fórmulas — la herramienta la automatiza partiendo del XLS tal cual lo baja el contribuyente.
 
 **Inputs:**
 
@@ -1213,7 +1214,7 @@ El sistema Mendez importa las retenciones de IVA y Ganancias del régimen SICORE
    | # Columna salida | Fuente / regla |
    |---|---|
    | 1 Fecha de Emisión | `Fecha Ret./Perc.` (`DD/MM/YYYY`) → `YYYY-MM-DD` |
-   | 2 Tipo de Comprobante | `1` (Factura A — única forma de que Mendez clasifique al Vendedor como Responsable Inscripto, ya que sólo los RI emiten Factura A. Si se usa `99` (Recibo) Mendez lo cataloga como Consumidor Final) |
+   | 2 Tipo de Comprobante | **Seleccionable desde la UI: `80` / `99` (default `99`)** para importes positivos. Si `Importe Ret./Perc.` < 0 → `3` (Nota de Crédito A) y el importe se emite en **valor absoluto (positivo)**, replicando la convención del Portal IVA Compras (la NC se distingue por el tipo de comprobante, no por el signo). |
    | 3 Punto de Venta | `Número Certificado[:2]` (primeros 2 chars) |
    | 4 Número de Comprobante | `Número Certificado[-8:]` (últimos 8 chars) |
    | 5 Tipo Doc. Vendedor | `80` (constante, CUIT) |
@@ -1239,19 +1240,25 @@ Los headers van con acentos limpios (`Emisión`, `Número`, `Denominación`, `Cr
 
 **Quoting en filas de datos:** strings (Denominación Vendedor, Moneda Original) entre comillas dobles; números (fecha ISO, tipo cbte, PV, nro, CUIT, importes, TC) **sin** comillas.
 
-**Ejemplo (fila 1 de IVA.xls — retención SICORE-IVA del 31/03/2026 a Aceitera General Deheza):**
+**Ejemplo (fila 1 de IVA.xls — retención SICORE-IVA del 31/03/2026 a Aceitera General Deheza, con tipo `99` seleccionado):**
 
 ```
-2026-03-31;1;20;26079026;80;30502874353;"ACEITERA GENERAL DEHEZA S.A.";42680,64;"PES";1,00;;;;42680,64;;;;;;;;;;;;;;;;;;
+2026-03-31;99;20;26079026;80;30502874353;"ACEITERA GENERAL DEHEZA S.A.";42680,64;"PES";1,00;;;;42680,64;;;;;;;;;;;;;;;;;;
 ```
 
 Desglose: PV=`20` y Nro=`26079026` salen del slicing del **Número Certificado** (`2026079026`); el `Importe Total` y la columna 14 llevan el mismo monto de la retención (sin separador de miles para que Mendez no interprete el punto como decimal y trunque el importe).
 
+**Ejemplo de NC (importe negativo en el XLS, ej. `-1.000,50`):** se emite con `Tipo = 3` e importe en valor absoluto:
+
+```
+2026-03-31;3;20;26079027;80;30502874353;"ACEITERA GENERAL DEHEZA S.A.";1000,50;"PES";1,00;;;;1000,50;;;;;;;;;;;;;;;;;;
+```
+
 **UI (4 cards):**
 
-- **Card 01** — Tipo de retención: radio horizontal `IVA` / `Ganancias`. Al cambiar el tipo se limpia cualquier resultado previo de `st.session_state` para evitar que un .zip viejo aparezca para descarga después de un cambio de selección.
+- **Card 01** — Tipo de retención y de comprobante: radio horizontal `IVA` / `Ganancias` + radio horizontal `99` / `80` (`Tipo de Comprobante` para importes positivos, default `99`). Al cambiar cualquiera de los dos se limpia cualquier resultado previo de `st.session_state` (comparando contra `ret_last_tipo` y `ret_last_tipo_cbte`) para evitar que un .zip viejo aparezca para descarga después de un cambio de selección.
 - **Card 02** — Uploader: `st.file_uploader(type=["xls", "xlsx"])` con `key=f"ret_xls_{tipo.lower()}"` (clave dinámica por tipo, así Streamlit no mezcla estados al togglear).
-- **Card 03** — Botón `⬡ Generar .zip`: parsea + transforma + empaqueta en un solo flujo. Persiste `ret_zip_bytes`, `ret_zip_name`, `ret_count`, `ret_periodo`, `ret_tipo_generado` en session_state. Muestra `stats-row` con cantidad de retenciones procesadas + período detectado.
+- **Card 03** — Botón `⬡ Generar .zip`: parsea + transforma (pasando el tipo de comprobante elegido) + empaqueta en un solo flujo. Persiste `ret_zip_bytes`, `ret_zip_name`, `ret_count`, `ret_periodo`, `ret_tipo_generado` en session_state. Muestra `stats-row` con cantidad de retenciones procesadas + período detectado + tipo de comprobante usado.
 - **Card 04** — Descarga: `st.download_button` con label `↓ .zip Retenciones {tipo} ({periodo})` y `file_name` = el zip_name del Portal IVA. Aparece sólo cuando hay un `.zip` listo en session_state.
 
 > [!NOTE]
