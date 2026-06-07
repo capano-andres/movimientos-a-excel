@@ -895,20 +895,23 @@ if herramienta == TOOL_MOVIMIENTOS:
         OPT_AUXILIAR = "Exportar con columna Auxiliar"
         OPT_RESUMENES = "Incluir hojas de resumen"
         OPT_ARCA = "Cruce de comprobantes con ARCA"
+        OPT_ARCA_ANUAL = "Cruce de comprobantes con ARCA (Anual)"
         OPT_ASIENTO = "Asiento Contable"
         OPT_ASIENTO_ANUAL = "Asiento Contable Anualizado (1 hoja x mes)"
 
         modo_export = st.radio(
             "Seleccioná el modo de exportación:",
-            options=[OPT_SOLO, OPT_AUXILIAR, OPT_RESUMENES, OPT_ARCA, OPT_ASIENTO, OPT_ASIENTO_ANUAL],
+            options=[OPT_SOLO, OPT_AUXILIAR, OPT_RESUMENES, OPT_ARCA, OPT_ARCA_ANUAL, OPT_ASIENTO, OPT_ASIENTO_ANUAL],
             index=0,
             help="Solo se puede elegir una opción a la vez."
         )
-        con_auxiliar  = modo_export == OPT_AUXILIAR
-        con_resumenes = modo_export == OPT_RESUMENES
-        cruce_arca    = modo_export == OPT_ARCA
-        con_asiento   = modo_export == OPT_ASIENTO
-        asiento_anual = modo_export == OPT_ASIENTO_ANUAL
+        con_auxiliar     = modo_export == OPT_AUXILIAR
+        con_resumenes    = modo_export == OPT_RESUMENES
+        cruce_arca       = modo_export == OPT_ARCA
+        cruce_arca_anual = modo_export == OPT_ARCA_ANUAL
+        con_asiento      = modo_export == OPT_ASIENTO
+        asiento_anual    = modo_export == OPT_ASIENTO_ANUAL
+        es_cruce         = cruce_arca or cruce_arca_anual
         st.markdown('</div>', unsafe_allow_html=True)
 
         # ─── Card 02b: Archivo ARCA (condicional) ──────────────────────────────────────
@@ -917,10 +920,16 @@ if herramienta == TOOL_MOVIMIENTOS:
         arca_csv_basename = None # Nombre del CSV interno del .zip
         arca_sep = None          # Separator del CSV original
         arca_zip_name = None     # Nombre del .zip subido
-        if cruce_arca:
-            st.markdown('<div class="card"><div class="card-label">02b · Archivo ARCA (.zip)</div>', unsafe_allow_html=True)
+        if es_cruce:
+            _arca_card_lbl = "02b · Archivo ARCA Anual (.zip)" if cruce_arca_anual else "02b · Archivo ARCA (.zip)"
+            st.markdown(f'<div class="card"><div class="card-label">{_arca_card_lbl}</div>', unsafe_allow_html=True)
+            _arca_help = (
+                "Subí el .zip de 'Mis Comprobantes → Consulta → Recibidos' (anual)"
+                if cruce_arca_anual else
+                "Subí el .zip descargado de ARCA con los comprobantes"
+            )
             uploaded_arca = st.file_uploader(
-                "Subí el .zip descargado de ARCA con los comprobantes",
+                _arca_help,
                 type=["zip"],
                 label_visibility="visible",
                 key="arca_zip"
@@ -978,38 +987,84 @@ if herramienta == TOOL_MOVIMIENTOS:
                                 df_arca[col_tipo] = df_arca[col_tipo].map(ARCA_TIPO_MAP).fillna(df_arca[col_tipo].astype(str))
 
                             # ── Limpieza de columnas ARCA ──────────────────────────────
-                            # Renombrar columnas (usa partial match para encodings rotos)
-                            RENAME_RULES = [
-                                (['fecha', 'emisi'], 'Fecha'),
-                                (['tipo', 'comprobante'], 'Comprobante'),
-                                (['punto', 'venta'], 'PV'),
-                                (['mero', 'comprobante'], 'Nro.'),
-                                (['tipo', 'doc', 'vendedor'], 'Tipo Doc.'),
-                                (['nro', 'doc', 'vendedor'], 'CUIT'),
-                                (['denominaci', 'vendedor'], 'Razon Social'),
-                                (['importe', 'total'], 'Total'),
-                        (['moneda', 'original'], 'Moneda'),
-                        (['tipo', 'cambio'], 'Tipo Cambio'),
-                                (['importe', 'no', 'gravado'], 'No Gravado'),
-                                (['importe', 'exento'], 'Exento'),
-                                (['pagos', 'cta', 'otros'], 'Otras Perc.'),
-                                (['percepciones', 'ingresos', 'brutos'], 'Perc IIBB'),
-                                (['impuestos', 'municipales'], 'Impuestos Munic.'),
-                                (['percepciones', 'pagos', 'cuenta', 'iva'], 'Perc. IVA'),
-                                (['impuestos', 'internos'], 'Imp. Int.'),
-                                (['importe', 'otros', 'tributos'], 'Otros. Trib.'),
-                                (['neto', 'gravado', 'iva', '0'], 'IVA 0%'),
-                                (['neto', 'gravado', 'iva', '21'], 'Gravado IVA 21'),
-                                (['importe', 'iva', '21'], 'IVA 21'),
-                                (['neto', 'gravado', 'iva', '27'], 'Gravado IVA 27'),
-                                (['importe', 'iva', '27'], 'IVA 27'),
-                                (['neto', 'gravado', 'iva', '10'], 'Gravado IVA 10,5'),
-                                (['importe', 'iva', '10'], 'IVA 10,5'),
-                                (['neto', 'gravado', 'iva', '2'], 'Gravado IVA 2,5'),
-                                (['importe', 'iva', '2'], 'IVA 2,5'),
-                                (['neto', 'gravado', 'iva', '5%'], 'Gravado IVA 5'),
-                                (['importe', 'iva', '5%'], 'IVA 5'),
-                            ]
+                            if cruce_arca_anual:
+                                # Esquema anual "Mis Comprobantes - Recibidos": dropear
+                                # primero las columnas ambiguas/sobrantes y luego renombrar
+                                # a los mismos nombres internos que el cruce mensual.
+                                ANNUAL_DROP_KEYWORDS = [
+                                    ['neto', 'gravado', 'total'],
+                                    ['total', 'iva'],
+                                    ['tipo', 'doc'],
+                                    ['nro', 'doc', 'receptor'],
+                                    ['autorizaci'],
+                                    ['mero', 'hasta'],
+                                ]
+                                _drop = []
+                                for _kws in ANNUAL_DROP_KEYWORDS:
+                                    for c in df_arca.columns:
+                                        if all(k in c.strip().lower() for k in _kws):
+                                            _drop.append(c)
+                                df_arca = df_arca.drop(columns=[c for c in _drop if c in df_arca.columns], errors='ignore')
+                                # Netos por alícuota PRIMERO (se consumen antes que los
+                                # importes de IVA, que comparten keyword 'iva').
+                                RENAME_RULES = [
+                                    (['fecha', 'emisi'], 'Fecha'),
+                                    (['tipo', 'comprobante'], 'Comprobante'),
+                                    (['punto', 'venta'], 'PV'),
+                                    (['mero', 'desde'], 'Nro.'),
+                                    (['nro', 'doc', 'emisor'], 'CUIT'),
+                                    (['denominaci', 'emisor'], 'Razon Social'),
+                                    (['imp', 'total'], 'Total'),
+                                    (['tipo', 'cambio'], 'Tipo Cambio'),
+                                    (['moneda'], 'Moneda'),
+                                    (['neto', 'no', 'gravado'], 'No Gravado'),
+                                    (['op', 'exenta'], 'Exento'),
+                                    (['otros', 'tributos'], 'Otros. Trib.'),
+                                    (['neto', 'gravado', 'iva', '0'], 'IVA 0%'),
+                                    (['neto', 'gravado', 'iva', '2,5'], 'Gravado IVA 2,5'),
+                                    (['neto', 'gravado', 'iva', '10'], 'Gravado IVA 10,5'),
+                                    (['neto', 'gravado', 'iva', '21'], 'Gravado IVA 21'),
+                                    (['neto', 'gravado', 'iva', '27'], 'Gravado IVA 27'),
+                                    (['neto', 'gravado', 'iva', '5%'], 'Gravado IVA 5'),
+                                    (['iva', '2,5'], 'IVA 2,5'),
+                                    (['iva', '10'], 'IVA 10,5'),
+                                    (['iva', '21'], 'IVA 21'),
+                                    (['iva', '27'], 'IVA 27'),
+                                    (['iva', '5%'], 'IVA 5'),
+                                ]
+                            else:
+                                # Renombrar columnas (usa partial match para encodings rotos)
+                                RENAME_RULES = [
+                                    (['fecha', 'emisi'], 'Fecha'),
+                                    (['tipo', 'comprobante'], 'Comprobante'),
+                                    (['punto', 'venta'], 'PV'),
+                                    (['mero', 'comprobante'], 'Nro.'),
+                                    (['tipo', 'doc', 'vendedor'], 'Tipo Doc.'),
+                                    (['nro', 'doc', 'vendedor'], 'CUIT'),
+                                    (['denominaci', 'vendedor'], 'Razon Social'),
+                                    (['importe', 'total'], 'Total'),
+                                    (['moneda', 'original'], 'Moneda'),
+                                    (['tipo', 'cambio'], 'Tipo Cambio'),
+                                    (['importe', 'no', 'gravado'], 'No Gravado'),
+                                    (['importe', 'exento'], 'Exento'),
+                                    (['pagos', 'cta', 'otros'], 'Otras Perc.'),
+                                    (['percepciones', 'ingresos', 'brutos'], 'Perc IIBB'),
+                                    (['impuestos', 'municipales'], 'Impuestos Munic.'),
+                                    (['percepciones', 'pagos', 'cuenta', 'iva'], 'Perc. IVA'),
+                                    (['impuestos', 'internos'], 'Imp. Int.'),
+                                    (['importe', 'otros', 'tributos'], 'Otros. Trib.'),
+                                    (['neto', 'gravado', 'iva', '0'], 'IVA 0%'),
+                                    (['neto', 'gravado', 'iva', '21'], 'Gravado IVA 21'),
+                                    (['importe', 'iva', '21'], 'IVA 21'),
+                                    (['neto', 'gravado', 'iva', '27'], 'Gravado IVA 27'),
+                                    (['importe', 'iva', '27'], 'IVA 27'),
+                                    (['neto', 'gravado', 'iva', '10'], 'Gravado IVA 10,5'),
+                                    (['importe', 'iva', '10'], 'IVA 10,5'),
+                                    (['neto', 'gravado', 'iva', '2'], 'Gravado IVA 2,5'),
+                                    (['importe', 'iva', '2'], 'IVA 2,5'),
+                                    (['neto', 'gravado', 'iva', '5%'], 'Gravado IVA 5'),
+                                    (['importe', 'iva', '5%'], 'IVA 5'),
+                                ]
                             rename_map = {}
                             for keywords, new_name in RENAME_RULES:
                                 for c in df_arca.columns:
@@ -1025,21 +1080,22 @@ if herramienta == TOOL_MOVIMIENTOS:
                                     lambda x: '/'.join(x.split('-')[::-1]) if '-' in x else x
                                 )
 
-                            # Eliminar columnas no deseadas
-                            DROP_KEYWORDS = [
-                                ['dito', 'fiscal', 'computable'],
-                                ['total', 'neto', 'gravado'],
-                                ['total', 'iva'],
-                                ['tipo', 'doc'],
-                            ]
-                            cols_to_drop = []
-                            for keywords in DROP_KEYWORDS:
-                                for c in df_arca.columns:
-                                    cl = c.strip().lower()
-                                    if all(k in cl for k in keywords):
-                                        cols_to_drop.append(c)
-                                        break
-                            df_arca = df_arca.drop(columns=[c for c in cols_to_drop if c in df_arca.columns], errors='ignore')
+                            # Eliminar columnas no deseadas (el modo anual ya dropeó antes de renombrar)
+                            if not cruce_arca_anual:
+                                DROP_KEYWORDS = [
+                                    ['dito', 'fiscal', 'computable'],
+                                    ['total', 'neto', 'gravado'],
+                                    ['total', 'iva'],
+                                    ['tipo', 'doc'],
+                                ]
+                                cols_to_drop = []
+                                for keywords in DROP_KEYWORDS:
+                                    for c in df_arca.columns:
+                                        cl = c.strip().lower()
+                                        if all(k in cl for k in keywords):
+                                            cols_to_drop.append(c)
+                                            break
+                                df_arca = df_arca.drop(columns=[c for c in cols_to_drop if c in df_arca.columns], errors='ignore')
 
                             # Mover Total al final
                             if 'Total' in df_arca.columns:
@@ -1071,11 +1127,23 @@ if herramienta == TOOL_MOVIMIENTOS:
                                 cols.insert(total_pos, 'Auxiliar')
                                 df_arca = df_arca[cols]
 
-                            # Columnas monetarias: desde 'No Gravado' en adelante (excluyendo Auxiliar)
-                            all_cols = list(df_arca.columns)
-                            ng_idx = all_cols.index('No Gravado') if 'No Gravado' in all_cols else None
-                            if ng_idx is not None:
-                                money_cols = [c for c in all_cols[ng_idx:] if c != 'Auxiliar']
+                            # Columnas monetarias a convertir de formato argentino a float.
+                            if cruce_arca_anual:
+                                # Lista explícita: en el CSV anual las alícuotas vienen ANTES
+                                # de 'No Gravado', así que la selección posicional no sirve.
+                                _money_internos = [
+                                    'No Gravado', 'Exento', 'Otros. Trib.', 'IVA 0%',
+                                    'Gravado IVA 2,5', 'IVA 2,5', 'Gravado IVA 5', 'IVA 5',
+                                    'Gravado IVA 10,5', 'IVA 10,5', 'Gravado IVA 21', 'IVA 21',
+                                    'Gravado IVA 27', 'IVA 27', 'Total',
+                                ]
+                                money_cols = [c for c in _money_internos if c in df_arca.columns]
+                            else:
+                                # Mensual: desde 'No Gravado' en adelante (excluyendo Auxiliar)
+                                all_cols = list(df_arca.columns)
+                                ng_idx = all_cols.index('No Gravado') if 'No Gravado' in all_cols else None
+                                money_cols = [c for c in all_cols[ng_idx:] if c != 'Auxiliar'] if ng_idx is not None else []
+                            if money_cols:
                                 for c in money_cols:
                                     # Convertir formato argentino: 1.234,56 -> 1234.56
                                     df_arca[c] = df_arca[c].astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
@@ -1147,7 +1215,7 @@ if herramienta == TOOL_MOVIMIENTOS:
                                 crear_excel(transacciones, meta, output,
                                             con_resumenes=con_resumenes,
                                             con_auxiliar=con_auxiliar,
-                                            cruce_arca=cruce_arca,
+                                            cruce_arca=es_cruce,
                                             df_arca=df_arca,
                                             con_asiento=con_asiento)
                             output.seek(0)
@@ -1184,7 +1252,7 @@ if herramienta == TOOL_MOVIMIENTOS:
                             f"{meta.get('periodo', '')}"
                         )
 
-                        if cruce_arca:
+                        if es_cruce:
                             excel_filename = "Cruce Compras.xlsx"
                         elif asiento_anual:
                             excel_filename = f"{filename}_asiento_anual.xlsx"
@@ -1201,7 +1269,7 @@ if herramienta == TOOL_MOVIMIENTOS:
                         )
 
                         # ── Cruce ARCA: .zip de comprobantes faltantes (mismo formato que ARCA) ──
-                        if cruce_arca and df_arca is not None and df_arca_raw is not None and 'Auxiliar' in df_arca.columns:
+                        if es_cruce and df_arca is not None and df_arca_raw is not None and 'Auxiliar' in df_arca.columns:
                             sistema_aux_set = construir_sistema_aux_set(transacciones)
                             mask_falt = ~df_arca['Auxiliar'].astype(str).isin(sistema_aux_set)
                             falt_idx = df_arca.index[mask_falt]

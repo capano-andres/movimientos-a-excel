@@ -512,6 +512,8 @@ Cuando se activa `cruce_arca=True`:
 
 La clave de cruce es la columna **Auxiliar**: `Tipo + " " + Letra + PV + Nro + CUIT`
 
+El modo **Cruce ARCA (Anual)** produce las mismas 4 hojas; sólo cambia el parseo del `.zip` de entrada (esquema "Mis Comprobantes - Recibidos"), que se normaliza al mismo `df_arca` interno antes de invocar `crear_excel(cruce_arca=True)`.
+
 ---
 
 ### Generadores de archivos regulatorios
@@ -612,8 +614,8 @@ La aplicación tiene un tema oscuro personalizado ("dark mode premium") con vari
 
 **La herramienta principal.** Flujo:
 1. Sube archivo `.txt` o `.prn`
-2. Elige modo: Solo Movimientos / Con Auxiliar / Con Resúmenes / Cruce ARCA / Asiento Contable
-3. Si es cruce ARCA: sube `.zip` de ARCA
+2. Elige modo: Solo Movimientos / Con Auxiliar / Con Resúmenes / Cruce ARCA / Cruce ARCA (Anual) / Asiento Contable
+3. Si es cruce ARCA (mensual o anual): sube `.zip` de ARCA
 4. Parsea → genera Excel → descarga
 
 **Modos de exportación:**
@@ -621,6 +623,21 @@ La aplicación tiene un tema oscuro personalizado ("dark mode premium") con vari
 - **Con Auxiliar**: Agrega columna con fórmula de concatenación para cruce manual
 - **Con Resúmenes**: Agrega 6 hojas de resúmenes con fórmulas interactivas
 - **Cruce ARCA**: Genera hojas SISTEMA/ARCA con VLOOKUP + diferencias **y, además del Excel, ofrece un segundo botón de descarga `↓ Descargar .zip de Faltantes (N comprobantes)`** que reempaqueta sólo las filas de ARCA que no aparecen en SISTEMA en un `.zip` **byte-equivalente** al original (mismo encoding `latin-1`, mismo separator, mismo nombre de CSV interno, mismas columnas crudas) — apto para alimentar la herramienta 10 (Importación Compras) o re-importar al sistema Mendez/Portal IVA sin retoques. Si no hay faltantes, el botón no aparece.
+- **Cruce ARCA (Anual)**: idéntico al Cruce ARCA (misma salida: hojas SISTEMA/ARCA/DE MAS/FALTANTES + `.zip` de Faltantes) pero consume el `.zip` **anual** que se baja de *Mis Comprobantes → Consulta → Recibidos*, cuyo CSV tiene **otro esquema** (ver tabla abajo). El modo lo normaliza al mismo `df_arca` interno antes de cruzar, así que reutiliza `crear_excel(cruce_arca=True)` y `construir_sistema_aux_set()` sin cambios.
+
+  | Campo | Mensual (Portal IVA) | Anual (Recibidos) |
+  |---|---|---|
+  | Contraparte | `...Vendedor` | `...Emisor` (`Nro./Denominación Emisor`) |
+  | Nro comprobante | `Número de Comprobante` | `Número Desde` / `Número Hasta` |
+  | Total | `Importe Total` | `Imp. Total` |
+  | Neto por alícuota | `Neto Gravado IVA X%` | `Imp. Neto Gravado IVA X%` |
+  | IVA por alícuota | `Importe IVA X%` | `IVA X%` |
+  | No gravado / exento | `Importe No Gravado` / `Importe Exento` | `Imp. Neto No Gravado` / `Imp. Op. Exentas` |
+  | Moneda | `Moneda Original` (`PES`) | `Moneda` (`$` / `USD`) |
+  | Extra | — | `Cód. Autorización`, `Tipo/Nro Doc. Receptor` |
+  | Orden de columnas | No Gravado precede a las alícuotas | las alícuotas preceden a No Gravado (por eso el parseo de montos del anual es por lista explícita, no posicional) |
+
+  > Limitaciones: en filas de moneda extranjera (`USD`) el `Total` queda en moneda original (el match por `Auxiliar` es correcto, pero el DIFF puede diferir); se usa `Número Desde` como Nro. (las facturas de compra son individuales, `Desde = Hasta`).
 - **Asiento Contable**: Agrega hoja de pre-asiento contable
 
 > [!NOTE]
