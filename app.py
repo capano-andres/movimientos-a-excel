@@ -2492,7 +2492,11 @@ elif herramienta == TOOL_LIQUIDACIONES:
                                     # Signo: "+" al final del concepto = crédito/reversa = negativo
                                     #        "-" al final del concepto = deducción normal = positivo
                                     #        "-" en el valor (formato original FISERV) = negativo
-                                    es_negativo = ("-" in partes[1]) or concepto_raw.endswith("+")
+                                    #        EXCEPCION: una venta ("VENTAS...+") es un alta, no una
+                                    #        reversa, y debe permanecer positiva.
+                                    es_negativo = ("-" in partes[1]) or (
+                                        concepto_raw.endswith("+") and not concepto.upper().startswith("VENTAS")
+                                    )
                                     valor = partes[1].strip().replace("Fecha", "").replace("-", "").replace(".", "").replace(",", ".")
                                     if "/" not in valor:
                                         try:
@@ -2526,7 +2530,7 @@ elif herramienta == TOOL_LIQUIDACIONES:
                                 else:
                                     df_total["QR RETENCION IIBB"] = df_total[col_acred]
 
-                            columnas_qr = [col for col in df_total.columns if col.startswith("QR")]
+                            columnas_qr = [col for col in df_total.columns if col.upper().startswith("QR") or "FISERV" in col.upper()]
                             df_qr = df_total[df_total[columnas_qr].sum(axis=1) != 0][["Fecha Pago", "Fecha Pres.", "Liquidacion"] + columnas_qr] if columnas_qr else None
                             columnas_ajuste = [col for col in df_total.columns if "AJUSTE" in col]
                             df_ajuste = df_total[df_total[columnas_ajuste].sum(axis=1) != 0][["Fecha Pago", "Fecha Pres.", "Liquidacion"] + columnas_ajuste] if columnas_ajuste else None
@@ -2744,14 +2748,15 @@ elif herramienta == TOOL_LIQUIDACIONES:
                                     for i, col in enumerate(cols_hoja):
                                         col_upper = col.upper()
                                         col_letter = get_column_letter(i + 1 + col_offset)
-                                        if "IVA" in col_upper and not col_upper.startswith("PER"):
+                                        tiene_perc = "PERC" in col_upper
+                                        if "IVA" in col_upper and not tiene_perc:
                                             if "IVA RI" in col_upper or ("10,50" not in col and "10.50" not in col):
                                                 iva21_col_letters.append(col_letter)
                                             else:
                                                 iva105_col_letters.append(col_letter)
-                                        if col_upper.startswith("PER") and "IVA" in col_upper:
+                                        if tiene_perc and "IVA" in col_upper:
                                             perc_iva_col_letters.append(col_letter)
-                                        elif col_upper.startswith("PER") and "IVA" not in col_upper:
+                                        elif tiene_perc and "IVA" not in col_upper:
                                             perc_iibb_col_letters.append(col_letter)
                                         if "SIRTAC" in col_upper:
                                             sirtac_col_letters.append(col_letter)
