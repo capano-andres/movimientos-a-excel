@@ -24,7 +24,7 @@ def _patched_sheet_init(self, *args, **kwargs):
     self.utter_max_rows = 1048576
 _xlrd_sheet.Sheet.__init__ = _patched_sheet_init
 
-from extractor_movimientos import parsear_archivo, crear_excel, crear_excel_consolidado_simple, generar_sifere_txt, generar_sifere_retenciones_txt, generar_percepciones_arba, generar_arba_desde_excel, generar_retenciones_arba, generar_retenciones_arba_desde_excel, construir_sistema_aux_set, CONCEPTOS_MAP, normalizar_csv_ventas_arca, consolidar_ventas_citi, generar_citi_ventas_lineas, generar_citi_alicuotas_lineas, crear_excel_ventas_citi, parsear_arca_retenciones_xls, transformar_retenciones_a_csv_arca, generar_zip_retenciones_arca, asignar_mes_por_xls_mendez, crear_excel_asiento_anual
+from extractor_movimientos import parsear_archivo, crear_excel, crear_excel_consolidado_simple, generar_sifere_txt, generar_sifere_retenciones_txt, generar_percepciones_arba, generar_arba_desde_excel, generar_retenciones_arba, generar_retenciones_arba_desde_excel, construir_sistema_aux_set, CONCEPTOS_MAP, normalizar_csv_ventas_arca, consolidar_ventas_citi, generar_citi_ventas_lineas, generar_citi_alicuotas_lineas, crear_excel_ventas_citi, parsear_arca_retenciones_xls, transformar_retenciones_a_csv_arca, generar_zip_retenciones_arca, asignar_mes_por_xls_mendez, crear_excel_asiento_anual, cargar_base_apoc, guardar_base_apoc, descargar_base_apoc
 
 @st.cache_data(show_spinner=False)
 def obtener_razon_social_cuitonline(cuit):
@@ -5617,6 +5617,7 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
         """, unsafe_allow_html=True)
 
 elif herramienta == TOOL_IMPORTACION:
+    from extractor_movimientos import APOC_PATH as APOC_PATH_IMP
     def _slug_concepto_imp(desc: str) -> str:
         s = re.sub(r'[\\/:*?"<>|]', '', desc).strip()
         s = re.sub(r'\s+', '_', s)
@@ -5653,6 +5654,49 @@ elif herramienta == TOOL_IMPORTACION:
             serie.astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False),
             errors='coerce',
         )
+
+    @st.cache_data(show_spinner=False)
+    def _base_apoc_cached(mtime):
+        return cargar_base_apoc()
+
+    _apoc_mtime = APOC_PATH_IMP.stat().st_mtime if APOC_PATH_IMP.exists() else None
+    df_apoc_base, apoc_generado = _base_apoc_cached(_apoc_mtime) if _apoc_mtime else (None, None)
+
+    with st.expander(
+        "Base APOC de ARCA (facturas apócrifas)"
+        + (f" · generada el {apoc_generado} · {len(df_apoc_base):,} CUITs" if df_apoc_base is not None else " · no cargada"),
+        expanded=df_apoc_base is None,
+    ):
+        if df_apoc_base is None:
+            st.info("No hay base APOC cargada: el chequeo de CUITs apócrifos está desactivado.")
+        else:
+            try:
+                _gen_dt = pd.to_datetime(apoc_generado, format='%d/%m/%Y')
+                if (pd.Timestamp.today() - _gen_dt).days > 30:
+                    st.warning("La base tiene más de 30 días. Conviene actualizarla.")
+            except Exception:
+                pass
+        if st.button("↻  Actualizar desde ARCA", key="apoc_update"):
+            try:
+                with st.spinner("Descargando base APOC desde ARCA..."):
+                    n, gen = descargar_base_apoc()
+                _base_apoc_cached.clear()
+                st.success(f"Base actualizada: {n:,} CUITs (generada el {gen}).")
+                st.rerun()
+            except Exception as e:
+                st.error(f"No se pudo descargar desde ARCA ({e}). Podés subir el archivo manualmente abajo.")
+        apoc_manual = st.file_uploader(
+            "O subí el FacturasApocrifas.zip / .txt manualmente",
+            type=["zip", "txt"], key="apoc_manual",
+        )
+        if apoc_manual is not None and st.button("Guardar archivo subido", key="apoc_save"):
+            try:
+                n, gen = guardar_base_apoc(apoc_manual.getvalue())
+                _base_apoc_cached.clear()
+                st.success(f"Base guardada: {n:,} CUITs (generada el {gen}).")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Archivo inválido: {e}")
 
     st.markdown('<div class="card"><div class="card-label">01 · Archivo TXT Mendez</div>', unsafe_allow_html=True)
     uploaded_txt_imp = st.file_uploader(
@@ -5731,6 +5775,27 @@ elif herramienta == TOOL_IMPORTACION:
                     lambda v: re.sub(r'[^0-9]', '', v)
                 )
                 df_arca_raw['_concepto'] = df_arca_raw['_cuit_norm'].map(concepto_por_cuit)
+
+                # ── Verificación: CUITs en la base de facturas apócrifas (solo avisa) ──
+                df_apoc_hit = pd.DataFrame()
+                if df_apoc_base is not None:
+                    apoc_idx = df_apoc_base.drop_duplicates('CUIT').set_index('CUIT')
+                    mask_apoc = df_arca_raw['_cuit_norm'].isin(apoc_idx.index)
+                    if mask_apoc.any():
+                        cols_id_apoc = []
+                        for kws in (['tipo', 'comprobante'], ['punto', 'venta'], ['mero', 'comprobante'], ['denominaci']):
+                            c = _find_col_imp(df_arca_raw, kws)
+                            if c is not None and c not in cols_id_apoc:
+                                cols_id_apoc.append(c)
+                        if cuit_col_arca not in cols_id_apoc:
+                            cols_id_apoc.append(cuit_col_arca)
+                        col_tot_apoc = _find_col_imp(df_arca_raw, ['importe', 'total'])
+                        if col_tot_apoc is not None:
+                            cols_id_apoc.append(col_tot_apoc)
+                        df_apoc_hit = df_arca_raw.loc[mask_apoc, cols_id_apoc + ['_cuit_norm']].copy()
+                        for _c in ['Fecha Condición Apócrifo', 'Fecha Publicación', 'Descripción']:
+                            df_apoc_hit[_c] = df_apoc_hit['_cuit_norm'].map(apoc_idx[_c])
+                        df_apoc_hit = df_apoc_hit.drop(columns=['_cuit_norm'])
 
                 # ── Verificación: Importe Total NO debe coincidir con un Neto Gravado ──
                 # (síntoma de IVA no sumado al cargar el comprobante). Solo avisa.
@@ -5813,6 +5878,14 @@ elif herramienta == TOOL_IMPORTACION:
                     f"{total_cruzados}/{total_arca} comprobantes cruzados · "
                     f"{total_sin} sin concepto"
                 )
+
+                if not df_apoc_hit.empty:
+                    st.warning(
+                        f"⚠ {len(df_apoc_hit)} comprobante(s) de {df_apoc_hit[cuit_col_arca].nunique()} "
+                        f"CUIT(s) que figuran en la base de facturas APÓCRIFAS de ARCA"
+                    )
+                    with st.expander("Comprobantes de CUITs apócrifos", expanded=True):
+                        st.dataframe(df_apoc_hit, use_container_width=True, hide_index=True)
 
                 if not df_flagged.empty:
                     st.warning(

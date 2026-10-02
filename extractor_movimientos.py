@@ -4283,5 +4283,82 @@ def main():
     print("✅ Proceso completado exitosamente.")
 
 
+# ═══════════════════════════════════════════════════════════════════
+#  Base de facturas apócrifas (APOC) de ARCA
+# ═══════════════════════════════════════════════════════════════════
+APOC_URL = 'https://servicioscf.afip.gob.ar/facturacion/facturasapocrifas/DownloadFile.aspx'
+APOC_PATH = Path(__file__).parent / 'data' / 'FacturasApocrifas.zip'
+
+
+def _apoc_texto_desde_bytes(data: bytes) -> str:
+    """Devuelve el texto del listado APOC a partir de un .zip (con un .txt) o de un .txt crudo."""
+    import zipfile
+    if data[:2] == b'PK':
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            nombres = [n for n in zf.namelist() if not n.endswith('/')]
+            if not nombres:
+                raise ValueError('El .zip de la base APOC está vacío.')
+            data = zf.read(nombres[0])
+    return data.decode('latin-1')
+
+
+def parsear_base_apoc(texto: str):
+    """Parsea el listado APOC. Devuelve (DataFrame, fecha_generacion_str).
+
+    Columnas: CUIT (11 dígitos), Fecha Condición Apócrifo, Fecha Publicación, Descripción.
+    Las líneas que empiezan con '#' son cabecera (la de 'Generado' aporta la fecha).
+    """
+    filas = []
+    generado = ''
+    for linea in texto.splitlines():
+        linea = linea.strip()
+        if not linea:
+            continue
+        if linea.startswith('#'):
+            m = re.search(r'Generado\s*-\s*(\S+)', linea)
+            if m:
+                generado = m.group(1)
+            continue
+        partes = [p.strip() for p in linea.split(',')]
+        cuit = re.sub(r'[^0-9]', '', partes[0])
+        if len(cuit) != 11:
+            continue
+        partes += [''] * (4 - len(partes))
+        filas.append((cuit, partes[1], partes[2], partes[3]))
+    if not filas:
+        raise ValueError('No se encontraron CUITs en el archivo de la base APOC.')
+    df = pd.DataFrame(filas, columns=['CUIT', 'Fecha Condición Apócrifo', 'Fecha Publicación', 'Descripción'])
+    return df, generado
+
+
+def guardar_base_apoc(data: bytes):
+    """Valida y guarda la base APOC (.zip o .txt) como data/FacturasApocrifas.zip."""
+    import zipfile
+    texto = _apoc_texto_desde_bytes(data)
+    df, generado = parsear_base_apoc(texto)  # valida el formato antes de reemplazar
+    APOC_PATH.parent.mkdir(parents=True, exist_ok=True)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr('FacturasApocrifas.txt', texto.encode('latin-1'))
+    APOC_PATH.write_bytes(buf.getvalue())
+    return len(df), generado
+
+
+def descargar_base_apoc(timeout=60):
+    """Descarga el listado completo desde ARCA (público, sin clave fiscal) y lo guarda."""
+    import urllib.request
+    req = urllib.request.Request(APOC_URL, headers={'User-Agent': 'Mozilla/5.0'})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = resp.read()
+    return guardar_base_apoc(data)
+
+
+def cargar_base_apoc():
+    """Lee la base guardada. Devuelve (DataFrame, fecha_generacion) o (None, None) si no existe."""
+    if not APOC_PATH.exists():
+        return None, None
+    return parsear_base_apoc(_apoc_texto_desde_bytes(APOC_PATH.read_bytes()))
+
+
 if __name__ == '__main__':
     main()
