@@ -638,7 +638,7 @@ La aplicación tiene un tema oscuro personalizado ("dark mode premium") con vari
   | Orden de columnas | No Gravado precede a las alícuotas | las alícuotas preceden a No Gravado (por eso el parseo de montos del anual es por lista explícita, no posicional) |
 
   > Limitaciones: en filas de moneda extranjera (`USD`) el `Total` queda en moneda original (el match por `Auxiliar` es correcto, pero el DIFF puede diferir); se usa `Número Desde` como Nro. (las facturas de compra son individuales, `Desde = Hasta`).
-- **Asiento Contable**: Agrega hoja de pre-asiento contable
+- **Asiento Contable**: Agrega hoja de pre-asiento contable. Al elegirlo aparece el checkbox **"¿Con discriminación de ventas exentas?"**: si se tilda (sólo en listados de Ventas) se agregan a la derecha dos columnas **informativas** por concepto: `EXENTAS` (suma de la columna Exento del concepto) y `GRAVADAS` (`=HABER − EXENTAS`), con fila de totales. No altera DEBE/HABER. Resuelve el caso de un mismo concepto con ventas gravadas y exentas mezcladas.
 
 > [!NOTE]
 > **Round-trip del .zip de Faltantes**: al subir el .zip de ARCA, la app parsea el CSV interno **dos veces** desde el mismo `csv_text`: una con la limpieza/renombrado habitual (que alimenta el Excel) y otra "cruda" con `pd.read_csv(..., dtype=str, keep_default_na=False)` para preservar valores como strings sin reformateo. Después del cruce, las filas faltantes se identifican por la columna Auxiliar de la vista renombrada y se mapean por índice a la vista cruda, que se reserializa con el mismo `sep` y `lineterminator='\n'` y se empaqueta con el `csv_basename` original. El helper que arma el set Auxiliar del SISTEMA es `construir_sistema_aux_set(transacciones)` ([extractor_movimientos.py](extractor_movimientos.py)).

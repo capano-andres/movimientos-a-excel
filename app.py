@@ -905,6 +905,13 @@ if herramienta == TOOL_MOVIMIENTOS:
             index=0,
             help="Solo se puede elegir una opción a la vez."
         )
+        asiento_exentas  = False
+        if modo_export == OPT_ASIENTO:
+            asiento_exentas = st.checkbox(
+                "¿Con discriminación de ventas exentas? (solo ventas, informativo)",
+                value=False,
+                help="Agrega las columnas GRAVADAS y EXENTAS por concepto en el asiento de ventas."
+            )
         con_auxiliar     = modo_export == OPT_AUXILIAR
         con_resumenes    = modo_export == OPT_RESUMENES
         cruce_arca       = modo_export == OPT_ARCA
@@ -1217,7 +1224,8 @@ if herramienta == TOOL_MOVIMIENTOS:
                                             con_auxiliar=con_auxiliar,
                                             cruce_arca=es_cruce,
                                             df_arca=df_arca,
-                                            con_asiento=con_asiento)
+                                            con_asiento=con_asiento,
+                                            discriminar_exentas=asiento_exentas)
                             output.seek(0)
 
                         st.success("✓  Proceso completado con éxito")

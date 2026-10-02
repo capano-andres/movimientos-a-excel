@@ -590,7 +590,8 @@ def _construir_filas_consolidado(transacciones: list[dict], meta: dict,
     return rows, IVA_COL_ORDER, other_cols, IVA_RATES
 
 
-def _escribir_hoja_asiento_contable(ws, df, meta, es_ventas, estilos, iva_col_order, other_cols):
+def _escribir_hoja_asiento_contable(ws, df, meta, es_ventas, estilos, iva_col_order, other_cols,
+                                    discriminar_exentas=False):
     """Escribe el contenido del Asiento Contable en la hoja `ws` usando `df` como dataset.
 
     `estilos` es un dict con: title_font, title_fill, report_type_font,
@@ -631,6 +632,14 @@ def _escribir_hoja_asiento_contable(ws, df, meta, es_ventas, estilos, iva_col_or
     else:
         _conc_total = pd.DataFrame(columns=['Concepto', '_neto', 'Desc'])
 
+    # --- A2. Exento por Concepto (solo informativo, ventas) ---
+    _discrim = bool(discriminar_exentas and es_ventas)
+    _exento_por_conc = {}
+    if _discrim and 'Exento' in df.columns:
+        _exento_por_conc = df.groupby('Concepto')['Exento'].sum().to_dict()
+    _last_col = 5 if _discrim else 3
+    _last_letter = 'E' if _discrim else 'C'
+
     # --- B. IVA total ---
     _iva_total = float(df[_as_iva_cols].sum().sum()) if _as_iva_cols else 0.0
 
@@ -649,13 +658,13 @@ def _escribir_hoja_asiento_contable(ws, df, meta, es_ventas, estilos, iva_col_or
     )
 
     # Filas 1-3: encabezado (razón social / tipo + título / CUIT + periodo)
-    ws.merge_cells('A1:C1')
+    ws.merge_cells(f'A1:{_last_letter}1')
     ws['A1'] = meta['razon_social'].upper() if meta['razon_social'] else 'CONTRIBUYENTE'
     ws['A1'].font = title_font
     ws['A1'].fill = title_fill
     ws['A1'].alignment = center_align
 
-    ws.merge_cells('A2:C2')
+    ws.merge_cells(f'A2:{_last_letter}2')
     _tr_label = (
         f"{meta['tipo_reporte'].upper()} - ASIENTO CONTABLE"
         if meta['tipo_reporte'] else 'ASIENTO CONTABLE'
@@ -664,7 +673,7 @@ def _escribir_hoja_asiento_contable(ws, df, meta, es_ventas, estilos, iva_col_or
     ws['A2'].font = report_type_font
     ws['A2'].alignment = center_align
 
-    ws.merge_cells('A3:C3')
+    ws.merge_cells(f'A3:{_last_letter}3')
     ws['A3'] = f"CUIT: {meta['cuit_empresa']} | Periodo: {meta['periodo']}"
     ws['A3'].font = Font(bold=True, size=11, color='2F5496')
     ws['A3'].alignment = center_align
@@ -678,6 +687,9 @@ def _escribir_hoja_asiento_contable(ws, df, meta, es_ventas, estilos, iva_col_or
         PatternFill('solid', fgColor='2F5496'),   # DEBE → azul oscuro
         PatternFill('solid', fgColor='375623'),   # HABER → verde oscuro
     ]
+    if _discrim:
+        _as_header_labels += ['GRAVADAS', 'EXENTAS']
+        _as_col_fills += [PatternFill('solid', fgColor='7F6000'), PatternFill('solid', fgColor='7F6000')]
     for _ci, (_h, _hf) in enumerate(zip(_as_header_labels, _as_col_fills), 1):
         _cell = ws.cell(row=_as_header_row, column=_ci)
         _cell.value = _h
@@ -710,6 +722,13 @@ def _escribir_hoja_asiento_contable(ws, df, meta, es_ventas, estilos, iva_col_or
             ws.cell(row=_curr, column=1).font = _desc_font
             _hc = ws.cell(row=_curr, column=3)
             _hc.value = float(_rd['_neto']); _hc.number_format = money_fmt; _hc.alignment = center_align
+            if _discrim:
+                _gc = ws.cell(row=_curr, column=4)
+                _gc.value = f'=C{_curr}-E{_curr}'
+                _gc.number_format = money_fmt; _gc.alignment = center_align
+                _ec = ws.cell(row=_curr, column=5)
+                _ec.value = float(_exento_por_conc.get(_rd['Concepto'], 0.0))
+                _ec.number_format = money_fmt; _ec.alignment = center_align
             _curr += 1
 
         # ── Fila IVA DEBITO → HABER ──
@@ -741,6 +760,17 @@ def _escribir_hoja_asiento_contable(ws, df, meta, es_ventas, estilos, iva_col_or
             _last_haber_cell.border = Border(top=Side(style='thin'), bottom=Side(style='double'))
         else:
             _du.value = 0
+
+        # ── Totales informativos GRAVADAS / EXENTAS (en la fila siguiente, sin avanzar _curr) ──
+        if _discrim and len(_conc_total) > 0:
+            _c_first = _haber_first
+            _c_last = _haber_first + len(_conc_total) - 1
+            for _col, _letter in ((4, 'D'), (5, 'E')):
+                _tc = ws.cell(row=_curr, column=_col)
+                _tc.value = f'=SUM({_letter}{_c_first}:{_letter}{_c_last})'
+                _tc.number_format = money_fmt; _tc.alignment = center_align
+                _tc.font = Font(bold=True, size=11)
+                _tc.border = Border(top=Side(style='thin'), bottom=Side(style='double'))
 
     else:
         # ═══════════════════════════════════════════════════════
@@ -856,13 +886,16 @@ def _escribir_hoja_asiento_contable(ws, df, meta, es_ventas, estilos, iva_col_or
         _rhc.font = Font(bold=True, size=11)
         _rhc.border = Border(top=Side(style='thin'), bottom=Side(style='double'))
 
-    _autofit(ws, 3, start_row=_as_header_row)
+    _autofit(ws, _last_col, start_row=_as_header_row)
     ws.column_dimensions['A'].width = 38
     ws.column_dimensions['B'].width = 20
     ws.column_dimensions['C'].width = 20
+    if _discrim:
+        ws.column_dimensions['D'].width = 20
+        ws.column_dimensions['E'].width = 20
 
 
-def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumenes=True, con_auxiliar=False, cruce_arca=False, df_arca=None, con_asiento=False):
+def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumenes=True, con_auxiliar=False, cruce_arca=False, df_arca=None, con_asiento=False, discriminar_exentas=False):
     """Crea un Excel formateado. Cada tasa de IVA tiene sus propias columnas
     Neto/IVA y cada percepcion/retencion tiene su propia columna.
     output_path puede ser una ruta o un BytesIO buffer."""
@@ -1813,7 +1846,8 @@ def crear_excel(transacciones: list[dict], meta: dict, output_path, con_resumene
                 'center_align': center_align,
             }
             _escribir_hoja_asiento_contable(
-                ws_as, df, meta, es_ventas, _estilos, IVA_COL_ORDER, other_cols
+                ws_as, df, meta, es_ventas, _estilos, IVA_COL_ORDER, other_cols,
+                discriminar_exentas=discriminar_exentas
             )
 
 
