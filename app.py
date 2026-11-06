@@ -2538,7 +2538,12 @@ elif herramienta == TOOL_LIQUIDACIONES:
                                 else:
                                     df_total["QR RETENCION IIBB"] = df_total[col_acred]
 
-                            columnas_qr = [col for col in df_total.columns if col.upper().startswith("QR") or "FISERV" in col.upper()]
+                            # CARGO TERMINAL FISERV queda en Liquidaciones (gasto exento del resumen), no en QR
+                            columnas_qr = [
+                                col for col in df_total.columns
+                                if (col.upper().startswith("QR") or "FISERV" in col.upper())
+                                and "CARGO TERMINAL" not in col.upper()
+                            ]
                             df_qr = df_total[df_total[columnas_qr].sum(axis=1) != 0][["Fecha Pago", "Fecha Pres.", "Liquidacion"] + columnas_qr] if columnas_qr else None
                             columnas_ajuste = [col for col in df_total.columns if "AJUSTE" in col]
                             df_ajuste = df_total[df_total[columnas_ajuste].sum(axis=1) != 0][["Fecha Pago", "Fecha Pres.", "Liquidacion"] + columnas_ajuste] if columnas_ajuste else None
@@ -2567,6 +2572,8 @@ elif herramienta == TOOL_LIQUIDACIONES:
                             zebra_fill = PatternFill('solid', fgColor='C8E6C9')
                             header_font_white = Font(bold=True, size=11, color='FFFFFF')
                             center_align = Alignment(horizontal='center', vertical='center')
+
+                            avisos_liq = []
 
                             def formatear_hoja_liq(ws, df_hoja, columnas_ignorar, titulo_encabezado=None, nombre_entidad="", mostrar_resumen=True):
                                 # Ocultar líneas de cuadrícula
@@ -2752,11 +2759,15 @@ elif herramienta == TOOL_LIQUIDACIONES:
                                     perc_iva_col_letters = []
                                     perc_iibb_col_letters = []
                                     sirtac_col_letters = []
+                                    cargo_terminal_col_letters = []
+                                    ventas_col_letters = []
+                                    neto_pagos_col_letters = []
 
                                     for i, col in enumerate(cols_hoja):
                                         col_upper = col.upper()
                                         col_letter = get_column_letter(i + 1 + col_offset)
-                                        tiene_perc = "PERC" in col_upper
+                                        # "PER B.A.I.BR.DN.01/04" = Percepción IIBB Bs.As. (no dice "PERC")
+                                        tiene_perc = "PERC" in col_upper or col_upper.startswith("PER ")
                                         if "IVA" in col_upper and not tiene_perc:
                                             if "IVA RI" in col_upper or ("10,50" not in col and "10.50" not in col):
                                                 iva21_col_letters.append(col_letter)
@@ -2764,67 +2775,92 @@ elif herramienta == TOOL_LIQUIDACIONES:
                                                 iva105_col_letters.append(col_letter)
                                         if tiene_perc and "IVA" in col_upper:
                                             perc_iva_col_letters.append(col_letter)
-                                        elif tiene_perc and "IVA" not in col_upper:
+                                        elif (tiene_perc or "I.BR" in col_upper or "ING.BR" in col_upper) \
+                                                and "IVA" not in col_upper and "SIRTAC" not in col_upper:
                                             perc_iibb_col_letters.append(col_letter)
                                         if "SIRTAC" in col_upper:
                                             sirtac_col_letters.append(col_letter)
+                                        if "CARGO TERMINAL" in col_upper:
+                                            cargo_terminal_col_letters.append(col_letter)
+                                        if col_upper.startswith("VENTAS"):
+                                            ventas_col_letters.append(col_letter)
+                                        if "IMPORTE NETO" in col_upper:
+                                            neto_pagos_col_letters.append(col_letter)
 
-                                    resumen_items = []
                                     tr = total_row
+                                    letra_a_col = {
+                                        get_column_letter(i + 1 + col_offset): c for i, c in enumerate(cols_hoja)
+                                    }
 
-                                    if iva21_col_letters:
-                                        if len(iva21_col_letters) == 1:
-                                            iva_ref = f"{iva21_col_letters[0]}{tr}"
-                                        else:
-                                            iva_ref = "+".join(f"{cl}{tr}" for cl in iva21_col_letters)
-                                        resumen_items.append(("NETO 21", f"=ABS({iva_ref})/0.21"))
-                                        resumen_items.append(("IVA 21", f"=ABS({iva_ref})"))
+                                    def _armar_items(ref, df_sub, val_col, primera_fila):
+                                        """Arma (concepto, fórmula) del resumen. `ref(letras)` devuelve la expresión
+                                        Excel que suma esas columnas; `df_sub` son las filas que abarca (para decidir
+                                        el AJUST RED en Python)."""
+                                        def _suma_py(letras):
+                                            return float(sum(df_sub[letra_a_col[l]].sum() for l in letras))
 
-                                    if iva105_col_letters:
-                                        if len(iva105_col_letters) == 1:
-                                            iva105_ref = f"{iva105_col_letters[0]}{tr}"
-                                        else:
-                                            iva105_ref = "+".join(f"{cl}{tr}" for cl in iva105_col_letters)
-                                        resumen_items.append(("NETO 10.5", f"=ABS({iva105_ref})/0.105"))
-                                        resumen_items.append(("IVA 10.5", f"=ABS({iva105_ref})"))
+                                        def _hay(letras):
+                                            # Omite renglones en cero (ej. sin IVA 10.5 en el mes anterior)
+                                            return bool(letras) and round(abs(_suma_py(letras)), 2) != 0
 
-                                    if perc_iva_col_letters:
-                                        if len(perc_iva_col_letters) == 1:
-                                            p_ref = f"{perc_iva_col_letters[0]}{tr}"
-                                        else:
-                                            p_ref = "+".join(f"{cl}{tr}" for cl in perc_iva_col_letters)
-                                        resumen_items.append(("PERC. IVA", f"=ABS({p_ref})"))
+                                        items = []
+                                        if _hay(iva21_col_letters):
+                                            r_ = ref(iva21_col_letters)
+                                            items.append(("NETO 21", f"=ABS({r_})/0.21"))
+                                            items.append(("IVA 21", f"=ABS({r_})"))
+                                        if _hay(iva105_col_letters):
+                                            r_ = ref(iva105_col_letters)
+                                            items.append(("NETO 10.5", f"=ABS({r_})/0.105"))
+                                            items.append(("IVA 10.5", f"=ABS({r_})"))
+                                        if _hay(perc_iva_col_letters):
+                                            items.append(("PERC. IVA", f"=ABS({ref(perc_iva_col_letters)})"))
+                                        if _hay(sirtac_col_letters):
+                                            items.append(("SIRTAC", f"=ABS({ref(sirtac_col_letters)})"))
+                                        if _hay(perc_iibb_col_letters):
+                                            items.append(("PERC. IIBB", f"=ABS({ref(perc_iibb_col_letters)})"))
+                                        if _hay(cargo_terminal_col_letters):
+                                            items.append(("EXENTO (CARGO TERMINAL)", f"=ABS({ref(cargo_terminal_col_letters)})"))
 
-                                    if sirtac_col_letters:
-                                        if len(sirtac_col_letters) == 1:
-                                            s_ref = f"{sirtac_col_letters[0]}{tr}"
-                                        else:
-                                            s_ref = "+".join(f"{cl}{tr}" for cl in sirtac_col_letters)
-                                        resumen_items.append(("SIRTAC", f"=ABS({s_ref})"))
+                                        # ─── AJUST RED: el resumen debe cuadrar con Ventas − Importe Neto ───
+                                        # (NETO 21 / NETO 10.5 salen de IVA/alícuota y pueden diferir en centavos)
+                                        diff_py = 0.0
+                                        if items and ventas_col_letters and neto_pagos_col_letters:
+                                            iva21_py = abs(_suma_py(iva21_col_letters))
+                                            iva105_py = abs(_suma_py(iva105_col_letters))
+                                            resumen_py = (
+                                                iva21_py / 0.21 + iva21_py
+                                                + iva105_py / 0.105 + iva105_py
+                                                + abs(_suma_py(perc_iva_col_letters))
+                                                + abs(_suma_py(sirtac_col_letters))
+                                                + abs(_suma_py(perc_iibb_col_letters))
+                                                + abs(_suma_py(cargo_terminal_col_letters))
+                                            )
+                                            desc_py = _suma_py(ventas_col_letters) - _suma_py(neto_pagos_col_letters)
+                                            diff_py = round(desc_py - resumen_py, 2)
+                                            if abs(diff_py) >= 0.01:
+                                                vl = get_column_letter(val_col)
+                                                ultima = primera_fila + len(items) - 1
+                                                items.append((
+                                                    "AJUST RED",
+                                                    f"=({ref(ventas_col_letters)})-({ref(neto_pagos_col_letters)})"
+                                                    f"-SUM({vl}{primera_fila}:{vl}{ultima})",
+                                                ))
+                                        return items, diff_py
 
-                                    if perc_iibb_col_letters:
-                                        if len(perc_iibb_col_letters) == 1:
-                                            pi_ref = f"{perc_iibb_col_letters[0]}{tr}"
-                                        else:
-                                            pi_ref = "+".join(f"{cl}{tr}" for cl in perc_iibb_col_letters)
-                                        resumen_items.append(("PERC. IIBB", f"=ABS({pi_ref})"))
+                                    def _escribir_resumen(items, titulo, col_ini, fila_ini):
+                                        """Escribe un cuadro de resumen de 3 columnas (concepto en 2, valor en 1)."""
+                                        merge_a = get_column_letter(col_ini)
+                                        merge_b = get_column_letter(col_ini + 1)
+                                        val_col = col_ini + 2
+                                        val_col_letter = get_column_letter(val_col)
+                                        ws.merge_cells(f'{merge_a}{fila_ini}:{val_col_letter}{fila_ini}')
+                                        ws[f'{merge_a}{fila_ini}'] = titulo
+                                        ws[f'{merge_a}{fila_ini}'].font = Font(bold=True, size=11, color='FFFFFF')
+                                        ws[f'{merge_a}{fila_ini}'].fill = header_fill
+                                        ws[f'{merge_a}{fila_ini}'].alignment = center_align
 
-                                    if resumen_items:
-                                        resumen_start = total_row + 2
-                                        # Resumen con 3 columnas (B:D)
-                                        res_start_letter = get_column_letter(first_data_col)
-                                        res_end_letter = get_column_letter(first_data_col + 2)
-                                        ws.merge_cells(f'{res_start_letter}{resumen_start}:{res_end_letter}{resumen_start}')
-                                        ws[f'{res_start_letter}{resumen_start}'] = "RESUMEN IMPOSITIVO"
-                                        ws[f'{res_start_letter}{resumen_start}'].font = Font(bold=True, size=11, color='FFFFFF')
-                                        ws[f'{res_start_letter}{resumen_start}'].fill = header_fill
-                                        ws[f'{res_start_letter}{resumen_start}'].alignment = center_align
-
-                                        for idx, (concepto, formula) in enumerate(resumen_items):
-                                            r = resumen_start + 1 + idx
-                                            merge_a = get_column_letter(first_data_col)
-                                            merge_b = get_column_letter(first_data_col + 1)  # Concepto ocupa 2 cols (B:C)
-                                            val_col = first_data_col + 2  # Valor en col D
+                                        for idx, (concepto, formula) in enumerate(items):
+                                            r = fila_ini + 1 + idx
                                             ws.merge_cells(f'{merge_a}{r}:{merge_b}{r}')
                                             ws[f'{merge_a}{r}'] = concepto
                                             ws[f'{merge_a}{r}'].font = Font(bold=True, size=10)
@@ -2835,43 +2871,86 @@ elif herramienta == TOOL_LIQUIDACIONES:
                                             cell_val.alignment = center_align
                                             if idx % 2 == 0:
                                                 ws[f'{merge_a}{r}'].fill = zebra_fill
-                                                ws.cell(row=r, column=first_data_col + 1).fill = zebra_fill
+                                                ws.cell(row=r, column=col_ini + 1).fill = zebra_fill
                                                 cell_val.fill = zebra_fill
 
                                         # Fila TOTAL del resumen
-                                        r_total = resumen_start + 1 + len(resumen_items)
-                                        first_val_row = resumen_start + 1
-                                        last_val_row = r_total - 1
-                                        merge_a = get_column_letter(first_data_col)
-                                        merge_b = get_column_letter(first_data_col + 1)
-                                        val_col = first_data_col + 2
+                                        r_total = fila_ini + 1 + len(items)
                                         ws.merge_cells(f'{merge_a}{r_total}:{merge_b}{r_total}')
                                         ws[f'{merge_a}{r_total}'] = "TOTAL"
                                         ws[f'{merge_a}{r_total}'].font = Font(bold=True, size=11, color='FFFFFF')
                                         ws[f'{merge_a}{r_total}'].fill = header_fill
                                         ws[f'{merge_a}{r_total}'].alignment = center_align
-                                        ws.cell(row=r_total, column=first_data_col + 1).fill = header_fill
-                                        val_col_letter = get_column_letter(val_col)
+                                        ws.cell(row=r_total, column=col_ini + 1).fill = header_fill
                                         cell_total = ws.cell(row=r_total, column=val_col)
-                                        cell_total.value = f"=SUM({val_col_letter}{first_val_row}:{val_col_letter}{last_val_row})"
+                                        cell_total.value = f"=SUM({val_col_letter}{fila_ini + 1}:{val_col_letter}{r_total - 1})"
                                         cell_total.number_format = money_fmt
                                         cell_total.font = Font(bold=True, size=10, color='FFFFFF')
                                         cell_total.fill = header_fill
                                         cell_total.alignment = center_align
 
-                                        # ─── Borde negro intenso externo en resumen impositivo ───
+                                        # ─── Borde negro intenso externo ───
                                         thick_side = Side(border_style='thick', color='000000')
                                         no_side = Side(border_style=None)
-                                        res_first_col = first_data_col
-                                        res_last_col = first_data_col + 2  # 3 columnas
-                                        for row_i in range(resumen_start, r_total + 1):
-                                            for col_i in range(res_first_col, res_last_col + 1):
+                                        for row_i in range(fila_ini, r_total + 1):
+                                            for col_i in range(col_ini, val_col + 1):
                                                 cell = ws.cell(row=row_i, column=col_i)
-                                                t = thick_side if row_i == resumen_start else no_side
+                                                t = thick_side if row_i == fila_ini else no_side
                                                 b = thick_side if row_i == r_total else no_side
-                                                l = thick_side if col_i == res_first_col else no_side
-                                                r_s = thick_side if col_i == res_last_col else no_side
+                                                l = thick_side if col_i == col_ini else no_side
+                                                r_s = thick_side if col_i == val_col else no_side
                                                 cell.border = Border(top=t, bottom=b, left=l, right=r_s)
+
+                                    resumen_start = total_row + 2
+
+                                    # ─── Resumen Impositivo (total de la hoja) ───
+                                    resumen_items, diff_total = _armar_items(
+                                        lambda letras: "+".join(f"{l}{tr}" for l in letras),
+                                        df_hoja, first_data_col + 2, resumen_start + 1,
+                                    )
+                                    if abs(diff_total) > 1:
+                                        avisos_liq.append(
+                                            f"El Resumen Impositivo no cuadra por $ {diff_total:,.2f} contra "
+                                            f"Ventas − Importe Neto: puede haber un concepto sin clasificar "
+                                            f"(quedó en AJUST RED)."
+                                        )
+                                    if resumen_items:
+                                        _escribir_resumen(resumen_items, "RESUMEN IMPOSITIVO", first_data_col, resumen_start)
+
+                                    # ─── Resumen Impositivo del MES ANTERIOR (Fecha Pres. del mes previo al período) ───
+                                    try:
+                                        _mm, _aaaa = (int(x) for x in periodo_liq.strip().split("/"))
+                                        _mm_ant, _aaaa_ant = (12, _aaaa - 1) if _mm == 1 else (_mm - 1, _aaaa)
+                                        sufijo_ant = f"/{_mm_ant:02d}/{_aaaa_ant}"
+                                    except ValueError:
+                                        sufijo_ant = None
+                                    if sufijo_ant and "Fecha Pres." in df_hoja.columns:
+                                        mask_ant = df_hoja["Fecha Pres."].astype(str).str.strip().str.endswith(sufijo_ant)
+                                        if mask_ant.any():
+                                            pres_letter = get_column_letter(first_data_col + 1)
+                                            rango_pres = f"${pres_letter}${data_start_row}:${pres_letter}${last_data_row}"
+
+                                            def _ref_ant(letras):
+                                                return "+".join(
+                                                    f'SUMIF({rango_pres},"*{sufijo_ant}",{l}{data_start_row}:{l}{last_data_row})'
+                                                    for l in letras
+                                                )
+
+                                            col_ant = first_data_col + 4  # deja una columna libre a la derecha del resumen
+                                            items_ant, diff_ant = _armar_items(
+                                                _ref_ant, df_hoja[mask_ant], col_ant + 2, resumen_start + 1,
+                                            )
+                                            if items_ant:
+                                                _escribir_resumen(
+                                                    items_ant,
+                                                    f"RESUMEN IMPOSITIVO MES ANTERIOR ({sufijo_ant[1:]}) · {int(mask_ant.sum())} liq.",
+                                                    col_ant, resumen_start,
+                                                )
+                                            if abs(diff_ant) > 1:
+                                                avisos_liq.append(
+                                                    f"El Resumen del mes anterior no cuadra por $ {diff_ant:,.2f} "
+                                                    f"contra Ventas − Importe Neto (quedó en AJUST RED)."
+                                                )
 
                             with pd.ExcelWriter(output, engine="openpyxl") as writer:
                                 df_movimientos.to_excel(writer, sheet_name="Liquidaciones", index=False)
@@ -2891,6 +2970,8 @@ elif herramienta == TOOL_LIQUIDACIONES:
                             output.seek(0)
 
                         st.success("✓  Liquidaciones procesadas con éxito")
+                        for _aviso in avisos_liq:
+                            st.warning(f"⚠ {_aviso}")
 
                         # Stats
                         st.markdown(f"""

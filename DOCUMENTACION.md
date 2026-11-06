@@ -733,6 +733,10 @@ La UI tiene un radio (después del file_uploader, antes de los inputs) `Formato 
 - Tema **verde**, encabezado con tipo de tarjeta + contribuyente + comprobante + periodo
 - 3 hojas: Liquidaciones, QR, AJUSTE
 - **Resumen Impositivo** automático: calcula IVA 21%, IVA 10.5%, PERC IVA, SIRTAC, PERC IIBB con fórmulas inversas (Neto = IVA / 0.21)
+  - **PERC. IIBB**: además de las columnas con `PERC`, reconoce `PER B.A.I.BR.DN.01/04` (Percepción IIBB Bs.As., así figura en los PDFs Fiserv) y cualquier columna con `I.BR` / `ING.BR` que no sea IVA ni SIRTAC.
+  - **EXENTO (CARGO TERMINAL)**: el `CARGO TERMINAL FISERV` se considera gasto exento y suma en el resumen. Esa columna **queda en la hoja Liquidaciones** (antes se iba a la hoja QR / First Data por contener `FISERV`).
+  - **AJUST RED**: el TOTAL del resumen debe igualar el total de descuentos de la hoja (`Σ VENTAS* − Σ IMPORTE NETO*`). Como NETO 21 / NETO 10.5 salen de dividir el IVA por la alícuota, puede haber diferencias de centavos: si la diferencia es ≥ $0,01 se agrega la fila `AJUST RED` con fórmula viva `=(Ventas)−(Neto)−SUM(items)`. Si supera $1 la app además muestra un `st.warning` (probable concepto sin clasificar, no es redondeo). En los PDFs de prueba (julio 2026) el ajuste quedó entre −0,16 y +0,04.
+  - **RESUMEN IMPOSITIVO MES ANTERIOR**: cuadro adicional a la derecha del resumen (deja una columna libre) con el mismo detalle, pero sólo de las liquidaciones cuya **Fecha Pres.** cae en el mes anterior al `PERIODO` ingresado (ej. período 07/2026 → filas con Fecha Pres. `../06/2026`; enero toma diciembre del año anterior). Las fórmulas usan `SUMIF(rango Fecha Pres.,"*/MM/AAAA", columna)`, así que se recalculan si se edita la hoja. Tiene su propio AJUST RED (contra Ventas − Neto de esas filas) y omite los renglones en cero. El Resumen Impositivo principal sigue sumando **todo** el mes. Si no hay filas del mes anterior, el cuadro no aparece.
 - Highlight amarillo/naranja para CARGO TERMINAL y ACREDITACIONES PAGO QRD
 - Selectbox de tarjeta con variantes Crédito/Débito (`Visa Crédito`, `Visa Débito`, `Mastercard Crédito`, ...)
 
