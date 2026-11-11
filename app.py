@@ -527,6 +527,97 @@ if herramienta in (TOOL_MOVIMIENTOS, TOOL_PORTAL_IVA):
 **FC** = Factura · **NC** = Nota de Crédito · **ND** = Nota de Débito · **TF** = Tique Factura · **TK** = Tique · **RC** = Recibo (se trata como FC)
         """)
 
+# ─── Parser de Liquidaciones CABAL (PDF "LIQUIDACION PARA PAGO A COMERCIOS") ──────
+# Bloques "FECHA DE PAGO : dd/mm/aaaa  LIQUIDACION NRO. : n" con subgrupos de ventas
+# (CABAL DEBITO / TARJETA DE CREDITO) y un cierre "TOT. FEC. PAGO:" con los descuentos
+# totales de la liquidación. Devuelve una fila por liquidación con los mismos nombres
+# de columna que entiende el Resumen Impositivo del formato Fiserv.
+_CABAL_RE_BLOQUE = re.compile(r"FECHA DE PAGO\s*:\s*(\d{2}/\d{2}/\d{4})\s+LIQUIDACION NRO\.\s*:\s*(\d+)")
+_CABAL_RE_VENTAS = re.compile(r"^\s*(?:TOT\. FEC\. PAGO:\s*\S+\s+)?(.*?)\s*TOTAL DE VENTAS\. CANTIDAD\.*\s+\d+\s+([\d.]+,\d{2})")
+_CABAL_RE_CONCEPTO = re.compile(r"^\s*([A-Z][A-Z0-9 ./+]*?[A-Z.])\s{2,}.*?(\d{1,3}(?:\.\d{3})*,\d{2})(-)?\s*$")
+
+
+def _cabal_num(s):
+    return float(s.replace(".", "").replace(",", "."))
+
+
+def parsear_pdf_cabal(texto):
+    """Parsea un PDF de liquidación CABAL. Devuelve (movimientos, banco)."""
+    texto = texto.replace("−", "-")
+    lineas = texto.splitlines()
+
+    banco = "CABAL"
+    for l in lineas:
+        m = re.match(r"^\s+(\S.*?)\s{2,}\d{10,}\s+\d{11}", l)
+        if m:
+            banco = m.group(1).strip()
+            break
+
+    movimientos = []
+    mov = None
+    en_totales = False
+    fechas_pres = []
+
+    def _cerrar():
+        if mov is not None:
+            if fechas_pres:
+                mov["Fecha Pres."] = min(fechas_pres, key=lambda f: (f[6:], f[3:5], f[:2]))
+            else:
+                mov["Fecha Pres."] = mov["Fecha Pago"]
+            movimientos.append(mov)
+
+    for l in lineas:
+        mb = _CABAL_RE_BLOQUE.search(l)
+        if mb:
+            _cerrar()
+            mov = {"Fecha Pago": mb.group(1), "Liquidacion": int(mb.group(2))}
+            fechas_pres = []
+            en_totales = False
+            continue
+        if mov is None:
+            continue
+        if l.strip().startswith("-----"):
+            en_totales = False
+            continue
+        if "*TOTAL RESUMEN*" in l:
+            mf = re.match(r"\s*(\d{2}/\d{2}/\d{4})", l)
+            if mf:
+                fechas_pres.append(mf.group(1))
+            continue
+        if "TOT. FEC. PAGO:" in l:
+            en_totales = True
+            continue  # el total de ventas ya se tomó por tipo
+        mv = _CABAL_RE_VENTAS.match(l)
+        if mv and not en_totales:
+            tipo = mv.group(1).strip().upper()
+            if "CREDITO" in tipo:
+                col = "VENTAS CABAL CREDITO"
+            elif "DEBITO" in tipo:
+                col = "VENTAS CABAL DEBITO"
+            else:
+                col = f"VENTAS {tipo}" if tipo else "VENTAS"
+            mov[col] = round(mov.get(col, 0) + _cabal_num(mv.group(2)), 2)
+            continue
+        if en_totales:
+            mc = _CABAL_RE_CONCEPTO.match(l)
+            if not mc:
+                continue
+            concepto = re.sub(r"\s*\.{2,}\s*$", "", mc.group(1)).strip()
+            if concepto.startswith("TOTAL DE VENTAS") or concepto.startswith("NETO A LIQUIDAR"):
+                continue
+            # Mismo criterio que Fiserv: descuento ("−" final en el PDF) = positivo,
+            # concepto a favor del comercio = negativo. El neto final siempre positivo.
+            if concepto.startswith("IMPORTE NETO"):
+                valor = _cabal_num(mc.group(2))
+            else:
+                valor = _cabal_num(mc.group(2)) * (1 if mc.group(3) else -1)
+            if round(valor, 2) == 0:
+                continue
+            mov[concepto] = round(mov.get(concepto, 0) + valor, 2)
+    _cerrar()
+    return movimientos, banco
+
+
 # ─── Parser de Liquidaciones VISA Santander (PDF) ──────────────────────────────────
 # Estructura del PDF: bloques "FECHA DE PAGO DD/MM" con uno o más Liq. N°/Lote N°,
 # detalle de ventas y descuentos por línea (Arancel, Serv.Costos Financieros, Servicio
@@ -2097,11 +2188,12 @@ elif herramienta == TOOL_LIQUIDACIONES:
     )
     formato_pdf = st.radio(
         "Formato del PDF",
-        options=["Fiserv / First Data", "Santander"],
+        options=["Fiserv / First Data", "Santander", "Cabal"],
         index=0,
         horizontal=True,
         key="liq_formato_pdf",
-        help="Fiserv: tabular con columnas $. Santander: bloques 'FECHA DE PAGO' con desglose final.",
+        help="Fiserv: tabular con columnas $. Santander: bloques 'FECHA DE PAGO' con desglose final. "
+             "Cabal: 'LIQUIDACION PARA PAGO A COMERCIOS' (débito y crédito en el mismo PDF).",
     )
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -2152,6 +2244,14 @@ elif herramienta == TOOL_LIQUIDACIONES:
                              "Cabal", "Naranja", "First Data", "Otra"],
                     index=0,
                     key="liq_tarjeta_santander",
+                )
+            elif formato_pdf == "Cabal":
+                # El PDF de Cabal trae débito y crédito juntos
+                tipo_tarjeta = st.selectbox(
+                    "Tipo de tarjeta / Entidad",
+                    options=["Cabal", "Cabal Crédito", "Cabal Débito", "Otra"],
+                    index=0,
+                    key="liq_tarjeta_cabal",
                 )
             else:
                 tipo_tarjeta = st.selectbox(
@@ -2464,8 +2564,14 @@ elif herramienta == TOOL_LIQUIDACIONES:
                         capturar = False
                         movimientos = []
                         movimiento = {}
-                        # Extraer nombre del banco de la segunda línea del PDF
-                        banco = texto_lines[1] if len(texto_lines) > 1 else "Banco desconocido"
+                        if formato_pdf == "Cabal":
+                            # Cabal: una fila por liquidación con los mismos nombres de columna
+                            # que el clasificador del Resumen Impositivo (ver parsear_pdf_cabal)
+                            movimientos, banco = parsear_pdf_cabal(texto)
+                            texto_lines = []
+                        else:
+                            # Extraer nombre del banco de la segunda línea del PDF
+                            banco = texto_lines[1] if len(texto_lines) > 1 else "Banco desconocido"
 
                         for linea in texto_lines:
                             if "F.de Pago" in linea:
@@ -2523,7 +2629,7 @@ elif herramienta == TOOL_LIQUIDACIONES:
                                         movimiento[concepto] = partes[1]
 
                     if not movimientos:
-                        st.error("No se encontraron liquidaciones en el PDF. Verificá el formato del archivo.")
+                        st.error(f"No se encontraron liquidaciones en el PDF. Verificá que el formato elegido ({formato_pdf}) sea el del archivo.")
                     else:
                         with st.spinner("Generando Excel..."):
                             df_total = pd.DataFrame(movimientos).fillna(0)

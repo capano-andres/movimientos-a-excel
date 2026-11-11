@@ -711,7 +711,7 @@ Herramienta bifuncional para la generación de archivos para la Agencia de Recau
 - **Control Ulterior:** Se requiere configuración explícita de `Quincena`, `Cod. Actividad` y `Nro Lote`.
 - **Empaquetado:** Archivo puro sin hash, acatando el estándar prefijado: `ER-CUIT-AAAAMMQ-ACTIVIDAD-LOTEXXXXX.ZIP`.
 
-#### 5. Liquidaciones Tarjeta (.pdf) — Fiserv / Santander
+#### 5. Liquidaciones Tarjeta (.pdf) — Fiserv / Santander / Cabal
 
 [app.py:L1865-L2330](file:///c:/Users/capan/Desktop/Trabajo/movimientos-a-excel/app.py#L1865-L2330)
 
@@ -739,6 +739,24 @@ La UI tiene un radio (después del file_uploader, antes de los inputs) `Formato 
   - **RESUMEN IMPOSITIVO MES ANTERIOR**: cuadro adicional a la derecha del resumen (deja una columna libre) con el mismo detalle, pero sólo de las liquidaciones cuya **Fecha Pres.** cae en el mes anterior al `PERIODO` ingresado (ej. período 07/2026 → filas con Fecha Pres. `../06/2026`; enero toma diciembre del año anterior). Las fórmulas usan `SUMIF(rango Fecha Pres.,"*/MM/AAAA", columna)`, así que se recalculan si se edita la hoja. Tiene su propio AJUST RED (contra Ventas − Neto de esas filas) y omite los renglones en cero. El Resumen Impositivo principal sigue sumando **todo** el mes. Si no hay filas del mes anterior, el cuadro no aparece.
 - Highlight amarillo/naranja para CARGO TERMINAL y ACREDITACIONES PAGO QRD
 - Selectbox de tarjeta con variantes Crédito/Débito (`Visa Crédito`, `Visa Débito`, `Mastercard Crédito`, ...)
+
+##### 5.A.1 Formato Cabal ("LIQUIDACION PARA PAGO A COMERCIOS")
+
+Tercera opción del radio `Formato del PDF`. Los PDFs de **Cabal** (pagados vía BBVA, ej. `RV__CABAL/data (21).pdf`) traen **débito y crédito mezclados** en el mismo archivo. El parser es `parsear_pdf_cabal(texto)` (función a nivel módulo en `app.py`, antes del parser Santander) y devuelve `(movimientos, banco)` con **los mismos nombres de columna que entiende el resumen Fiserv**; a partir de ahí se reutiliza todo el Excel del formato 5.A (hoja Liquidaciones, TOTAL, Resumen Impositivo, AJUST RED, cuadro del mes anterior). No genera hojas QR ni AJUSTE.
+
+**Estructura del PDF:** bloques `FECHA DE PAGO : dd/mm/aaaa    LIQUIDACION NRO. : nnnnnn`, con subgrupos `*VENTAS CORRESPONDIENTES A CABAL DEBITO` / `... TARJETA DE CREDITO` (cupones + líneas `*TOTAL RESUMEN*`, cuya fecha es la de presentación, + `<TIPO> TOTAL DE VENTAS. CANTIDAD...`) y un cierre `TOT. FEC. PAGO:` con los descuentos de toda la liquidación. Deducciones con `−` final; números `1.234,56`.
+
+**Una fila por liquidación:**
+
+| Columna | Origen |
+|---|---|
+| `Fecha Pago` / `Liquidacion` | Encabezado del bloque |
+| `Fecha Pres.` | La **más antigua** de las líneas `*TOTAL RESUMEN*` del bloque (si una liquidación trae presentaciones de dos meses, cuenta entera en el mes de la más vieja para el cuadro del mes anterior) |
+| `VENTAS CABAL DEBITO` / `VENTAS CABAL CREDITO` | `TOTAL DE VENTAS` de cada subgrupo (`TARJETA DE CREDITO` → CREDITO) |
+| `ARANCEL DE DESCUENTO`, `IVA S/ARANCEL + COSTO FINANCIERO`, `RETENCION IIBB SIRTAC`, `COSTO FINANCIERO TOTAL`, otros | Líneas de `TOT. FEC. PAGO`. Mismo signo que Fiserv: descuento (`−` en el PDF) = **positivo**, concepto a favor del comercio = negativo. Los importes en 0 no se cargan; se ignora el subtotal `NETO A LIQUIDAR POR VENTAS` |
+| `IMPORTE NETO FINAL A LIQUIDAR` | Línea de `TOT. FEC. PAGO` |
+
+En el Resumen Impositivo: `IVA S/ARANCEL...` → IVA 21 (NETO 21 = IVA/0,21), `RETENCION IIBB SIRTAC` → SIRTAC; el TOTAL cuadra con Ventas − Importe Neto (AJUST RED de centavos). Banco del encabezado: línea del agente de retención (ej. `BBVA ARGENTINA S.A.`). Selectbox de tarjeta: `Cabal`, `Cabal Crédito`, `Cabal Débito`, `Otra`.
 
 ##### 5.B Formato Santander (Resumen Mensual de Liquidaciones)
 
