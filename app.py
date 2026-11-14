@@ -2898,7 +2898,37 @@ elif herramienta == TOOL_LIQUIDACIONES:
                                         get_column_letter(i + 1 + col_offset): c for i, c in enumerate(cols_hoja)
                                     }
 
-                                    def _armar_items(ref, df_sub, val_col, primera_fila):
+                                    # Conceptos que se descuentan del Importe Neto pero viven en las hojas
+                                    # QR (First Data, comprobante aparte) y AJUSTE: no van al resumen, pero
+                                    # hay que restarlos de Ventas − Neto para que el AJUST RED no los absorba.
+                                    otras_hojas = []  # (nombre hoja, df, columnas de importe)
+                                    if df_qr is not None:
+                                        otras_hojas.append(("QR", df_qr, columnas_qr))
+                                    if df_ajuste is not None:
+                                        otras_hojas.append(("AJUSTE", df_ajuste, columnas_ajuste))
+
+                                    def _otras(sufijo=None, df_sub=None):
+                                        """Devuelve (expresión Excel, valor Python) de lo que se fue a QR/AJUSTE.
+                                        Con `sufijo` filtra por Fecha Pres. (cuadro del mes anterior)."""
+                                        partes, total_py = [], 0.0
+                                        for hoja, df_o, cols_o in otras_hojas:
+                                            ini_o = 9  # mismas filas que formatear_hoja_liq con encabezado
+                                            fin_o = ini_o + len(df_o) - 1
+                                            for j, c_o in enumerate(cols_o):
+                                                l_o = get_column_letter(5 + j)  # B,C,D = Fecha Pago/Pres./Liq
+                                                if sufijo:
+                                                    partes.append(
+                                                        f"SUMIF('{hoja}'!$C${ini_o}:$C${fin_o},\"*{sufijo}\","
+                                                        f"'{hoja}'!{l_o}{ini_o}:{l_o}{fin_o})"
+                                                    )
+                                                else:
+                                                    partes.append(f"'{hoja}'!{l_o}{fin_o + 1}")
+                                        if df_sub is not None and otras_hojas:
+                                            cols_all = [c for _, _, cs in otras_hojas for c in cs]
+                                            total_py = float(df_total.loc[df_sub.index, cols_all].to_numpy().sum())
+                                        return "+".join(partes), total_py
+
+                                    def _armar_items(ref, df_sub, val_col, primera_fila, otras=("", 0.0)):
                                         """Arma (concepto, fórmula) del resumen. `ref(letras)` devuelve la expresión
                                         Excel que suma esas columnas; `df_sub` son las filas que abarca (para decidir
                                         el AJUST RED en Python)."""
@@ -2941,15 +2971,17 @@ elif herramienta == TOOL_LIQUIDACIONES:
                                                 + abs(_suma_py(perc_iibb_col_letters))
                                                 + abs(_suma_py(cargo_terminal_col_letters))
                                             )
-                                            desc_py = _suma_py(ventas_col_letters) - _suma_py(neto_pagos_col_letters)
+                                            otras_expr, otras_py = otras
+                                            desc_py = _suma_py(ventas_col_letters) - _suma_py(neto_pagos_col_letters) - otras_py
                                             diff_py = round(desc_py - resumen_py, 2)
                                             if abs(diff_py) >= 0.01:
                                                 vl = get_column_letter(val_col)
                                                 ultima = primera_fila + len(items) - 1
+                                                resta_otras = f"-({otras_expr})" if otras_expr else ""
                                                 items.append((
                                                     "AJUST RED",
                                                     f"=({ref(ventas_col_letters)})-({ref(neto_pagos_col_letters)})"
-                                                    f"-SUM({vl}{primera_fila}:{vl}{ultima})",
+                                                    f"{resta_otras}-SUM({vl}{primera_fila}:{vl}{ultima})",
                                                 ))
                                         return items, diff_py
 
@@ -3013,6 +3045,7 @@ elif herramienta == TOOL_LIQUIDACIONES:
                                     resumen_items, diff_total = _armar_items(
                                         lambda letras: "+".join(f"{l}{tr}" for l in letras),
                                         df_hoja, first_data_col + 2, resumen_start + 1,
+                                        otras=_otras(df_sub=df_hoja),
                                     )
                                     if abs(diff_total) > 1:
                                         avisos_liq.append(
@@ -3045,6 +3078,7 @@ elif herramienta == TOOL_LIQUIDACIONES:
                                             col_ant = first_data_col + 4  # deja una columna libre a la derecha del resumen
                                             items_ant, diff_ant = _armar_items(
                                                 _ref_ant, df_hoja[mask_ant], col_ant + 2, resumen_start + 1,
+                                                otras=_otras(sufijo=sufijo_ant, df_sub=df_hoja[mask_ant]),
                                             )
                                             if items_ant:
                                                 _escribir_resumen(
