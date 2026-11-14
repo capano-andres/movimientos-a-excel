@@ -25,3 +25,9 @@ __pycache__/
 
 # PERO NO ignorar el archivo de requerimientos
 !requirements.txt
+# Certificado ARCA y secrets de Streamlit (nunca subir)
+.streamlit/secrets.toml
+*.key
+*.crt
+*.pem
+*.csr

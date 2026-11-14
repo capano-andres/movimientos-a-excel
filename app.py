@@ -492,10 +492,11 @@ TOOL_CRUCE_DEDUCCIONES = "Cruce de Deducciones"
 TOOL_IMPORTACION = "Importacion Compras (TXT + ZIP ARCA -> ZIPs por Concepto)"
 TOOL_VENTAS_CITI = "Armado .zip Importacion Ventas / CITI (ZIP ARCA -> VENTAS.txt + ALICUOTAS.txt)"
 TOOL_RETENCIONES = "Importacion Retenciones IVA / Ganancias (XLS ARCA -> .zip Portal IVA)"
+TOOL_CONSULTA_CUIT = "Consulta de CUIT (Padrón ARCA)"
 
 herramienta = st.selectbox(
     "Seleccioná la herramienta:",
-    options=[TOOL_MOVIMIENTOS, TOOL_PORTAL_IVA, TOOL_SIFERE, TOOL_ARBA, TOOL_LIQUIDACIONES, TOOL_DEDUCCIONES, TOOL_CRUCE_CONCEPTO, TOOL_CM05, TOOL_CRUCE_DEDUCCIONES, TOOL_IMPORTACION, TOOL_VENTAS_CITI, TOOL_RETENCIONES],
+    options=[TOOL_MOVIMIENTOS, TOOL_PORTAL_IVA, TOOL_SIFERE, TOOL_ARBA, TOOL_LIQUIDACIONES, TOOL_DEDUCCIONES, TOOL_CRUCE_CONCEPTO, TOOL_CM05, TOOL_CRUCE_DEDUCCIONES, TOOL_IMPORTACION, TOOL_VENTAS_CITI, TOOL_RETENCIONES, TOOL_CONSULTA_CUIT],
     index=0,
 )
 
@@ -6388,3 +6389,101 @@ elif herramienta == TOOL_RETENCIONES:
         </div>
         """, unsafe_allow_html=True)
 
+
+elif herramienta == TOOL_CONSULTA_CUIT:
+    # ───────────────────────────────────────────────────────────────────────────────
+    # HERRAMIENTA: Consulta de CUIT en el padrón de ARCA (ws_sr_constancia_inscripcion)
+    # ───────────────────────────────────────────────────────────────────────────────
+    from arca_padron import consultar_cuit, validar_cuit, formatear_cuit, ArcaError
+
+    try:
+        _arca_cfg = st.secrets["arca"]
+        arca_cert = str(_arca_cfg["cert"])
+        arca_key = str(_arca_cfg["key"])
+        arca_cuit_rep = str(_arca_cfg["cuit_representada"])
+    except Exception:
+        arca_cert = arca_key = arca_cuit_rep = None
+
+    if not arca_cert:
+        st.info(
+            "**Falta configurar el certificado de ARCA.**\n\n"
+            "1. Generá la clave y el pedido: `openssl genrsa -out arca.key 2048` y "
+            "`openssl req -new -key arca.key -subj \"/C=AR/O=Estudio/CN=movimientos/serialNumber=CUIT 30XXXXXXXXX\" -out arca.csr`.\n"
+            "2. En ARCA → *Administración de Certificados Digitales*: creá un alias, subí el `.csr` y descargá el `.crt`.\n"
+            "3. En ARCA → *Administrador de Relaciones de Clave Fiscal*: nueva relación → WebServices → "
+            "*Consulta de Constancia de Inscripción* (`ws_sr_constancia_inscripcion`) → representante: el alias del certificado.\n"
+            "4. Cargá en los **Secrets** de Streamlit (o en `.streamlit/secrets.toml` en local) la sección `[arca]` "
+            "con `cuit_representada`, `cert` (contenido del `.crt`) y `key` (contenido del `.key`)."
+        )
+    else:
+        st.markdown('<div class="card"><div class="card-label">01 · CUIT a consultar</div>', unsafe_allow_html=True)
+        cuit_in = st.text_input("CUIT", value="", placeholder="Ej: 30-12345678-9", key="consulta_cuit_in")
+        btn_cuit = st.button("⬡  Consultar en ARCA", key="consulta_cuit_btn")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        if btn_cuit:
+            try:
+                cuit_ok = validar_cuit(cuit_in)
+            except ValueError as e:
+                st.error(str(e))
+                cuit_ok = None
+            if cuit_ok:
+                try:
+                    with st.spinner("Consultando el padrón de ARCA..."):
+                        st.session_state["consulta_cuit_res"] = consultar_cuit(
+                            cuit_ok, arca_cert, arca_key, arca_cuit_rep
+                        )
+                except ArcaError as e:
+                    st.session_state.pop("consulta_cuit_res", None)
+                    st.error(f"ARCA: {e}")
+                except Exception as e:
+                    st.session_state.pop("consulta_cuit_res", None)
+                    st.error(f"Error al consultar: {e}")
+
+        res = st.session_state.get("consulta_cuit_res")
+        if res:
+            st.markdown('<div class="card"><div class="card-label">02 · Resultado</div>', unsafe_allow_html=True)
+            st.markdown(f"### {res['nombre'] or '(sin nombre)'}")
+            st.caption(f"CUIT {formatear_cuit(res['cuit'])}")
+            st.markdown(f"""
+            <div class="stats-row">
+                <div class="stat-chip">
+                    <span class="stat-val" style="font-size:0.95rem">{res['condicion_iva']}</span>
+                    <span class="stat-lbl">Condición IVA</span>
+                </div>
+                <div class="stat-chip">
+                    <span class="stat-val" style="font-size:0.95rem">{res['tipo_persona'] or '-'}</span>
+                    <span class="stat-lbl">Tipo de persona</span>
+                </div>
+                <div class="stat-chip">
+                    <span class="stat-val" style="font-size:0.95rem">{res['estado_clave'] or '-'}</span>
+                    <span class="stat-lbl">Estado CUIT</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            dom = res["domicilio"]
+            partes_dom = [dom["direccion"], dom["localidad"],
+                          f"CP {dom['cod_postal']}" if dom["cod_postal"] else "", dom["provincia"]]
+            st.markdown("**Domicilio fiscal:** " + (" · ".join(p for p in partes_dom if p) or "no informado"))
+            if res["monotributo"] and res["monotributo"].get("categoria"):
+                st.markdown(f"**Categoría monotributo:** {res['monotributo']['categoria']}")
+
+            if res["actividades"]:
+                st.markdown("**Actividades (CLAE)**")
+                st.dataframe(pd.DataFrame([{
+                    "": "★ Principal" if i == 0 else "",
+                    "Código": a["id"], "Actividad": a["descripcion"],
+                    "Orden": a["orden"], "Desde": a["periodo"],
+                } for i, a in enumerate(res["actividades"])]), hide_index=True, use_container_width=True)
+
+            if res["impuestos"]:
+                st.markdown("**Impuestos**")
+                st.dataframe(pd.DataFrame([{
+                    "Código": i["id"], "Impuesto": i["descripcion"],
+                    "Estado": i["estado"], "Desde": i["periodo"],
+                } for i in res["impuestos"]]), hide_index=True, use_container_width=True)
+
+            if res["errores"]:
+                st.warning("ARCA informó observaciones:\n\n" + "\n".join(f"- {e}" for e in res["errores"]))
+            st.markdown('</div>', unsafe_allow_html=True)

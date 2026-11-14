@@ -4,3 +4,5 @@ PyPDF2==3.0.1
 xlrd>=2.0.1
 streamlit==1.28.1
 xlsxwriter==3.2.0
+requests>=2.31
+cryptography>=42

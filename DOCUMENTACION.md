@@ -606,7 +606,7 @@ La aplicación tiene un tema oscuro personalizado ("dark mode premium") con vari
 
 ---
 
-### Las 12 herramientas
+### Las 13 herramientas
 
 #### 1. Listado por fecha TXT Mendez a Excel limpio
 
@@ -1311,6 +1311,43 @@ Desglose: PV=`20` y Nro=`26079026` salen del slicing del **Número Certificado**
 - Patrón de empaquetado ZIP en memoria (`zipfile.ZipFile(BytesIO, 'w')`) — herramientas 4, 10, 11.
 - Patrón de `st.session_state` para persistir bytes de descarga entre re-runs — mismo patrón de la herramienta 11 (CITI Ventas) y la 2 (modo Edición .zip).
 - Sistema de cards `.card / .card-label / .stats-row / .stat-chip` del CSS global ([app.py:64-477](app.py#L64-L477)).
+
+#### 13. Consulta de CUIT (Padrón ARCA)
+
+Consulta **un CUIT** en el padrón de ARCA mediante el web service **`ws_sr_constancia_inscripcion`** (`getPersona_v2`, producción) y muestra: razón social / nombre, condición frente a IVA, tipo de persona, estado del CUIT, domicilio fiscal, actividades CLAE (la de `orden` 1 marcada como principal), impuestos, categoría de monotributo y las observaciones de ARCA (`errorConstancia`, `errorRegimenGeneral`, `errorMonotributo`).
+
+**Módulo `arca_padron.py`** (sin Streamlit):
+
+| Función | Rol |
+|---|---|
+| `validar_cuit(cuit)` | Limpia guiones, exige 11 dígitos y valida el dígito verificador (módulo 11) |
+| `_crear_tra()` / `_firmar_cms()` | Arma el `loginTicketRequest` y lo firma como CMS con contenido incluido usando `cryptography` (no necesita el binario openssl, funciona en Streamlit Cloud) |
+| `obtener_ticket(cert, key)` | Login en WSAA. El ticket (TA) dura 12 h y **WSAA rechaza pedir otro mientras hay uno vigente**, así que se cachea en memoria y en un JSON en el directorio temporal. Si la app se reinicia y pierde el TA, ARCA responde "ya posee un TA válido": hay que esperar a que venza (hasta 12 h) o usar otro certificado |
+| `parsear_persona(xml)` | Normaliza la respuesta. Condición IVA: monotributo (datos de monotributo o impuesto 20) → *Monotributo*; impuesto 30 → *IVA Responsable Inscripto*; 32 → *IVA Exento*; si no, *No inscripto / no informado* |
+| `consultar_cuit(cuit, cert, key, cuit_representada)` | Valida, obtiene el TA y llama a `getPersona_v2`. Los SOAP Fault se convierten en `ArcaError` |
+
+**Credenciales** en `st.secrets["arca"]` (Streamlit Cloud → Settings → Secrets; en local `.streamlit/secrets.toml`, ignorado por git junto con `*.key`, `*.crt`, `*.pem`, `*.csr`):
+
+```toml
+[arca]
+cuit_representada = "30XXXXXXXXX"
+cert = """-----BEGIN CERTIFICATE-----
+...
+-----END CERTIFICATE-----"""
+key = """-----BEGIN PRIVATE KEY-----
+...
+-----END PRIVATE KEY-----"""
+```
+
+Si faltan, la herramienta muestra el instructivo y no consulta.
+
+**Alta del certificado (una sola vez):**
+1. `openssl genrsa -out arca.key 2048` y `openssl req -new -key arca.key -subj "/C=AR/O=Estudio/CN=movimientos/serialNumber=CUIT 30XXXXXXXXX" -out arca.csr`.
+2. ARCA con clave fiscal → *Administración de Certificados Digitales* → nuevo alias → subir el `.csr` → descargar el `.crt`.
+3. *Administrador de Relaciones de Clave Fiscal* → Nueva relación → ARCA → WebServices → *Consulta de Constancia de Inscripción* (`ws_sr_constancia_inscripcion`) → representante: el alias del certificado.
+4. Pegar el `.crt` y el `.key` en los Secrets.
+
+Próximos pasos posibles: consulta en lote (`getPersonaList_v2`) desde el CSV de *Mis Comprobantes* y sugerencia de concepto contable por CLAE.
 
 ---
 
