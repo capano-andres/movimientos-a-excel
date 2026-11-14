@@ -26,34 +26,33 @@ _xlrd_sheet.Sheet.__init__ = _patched_sheet_init
 
 from extractor_movimientos import parsear_archivo, crear_excel, crear_excel_consolidado_simple, generar_sifere_txt, generar_sifere_retenciones_txt, generar_percepciones_arba, generar_arba_desde_excel, generar_retenciones_arba, generar_retenciones_arba_desde_excel, construir_sistema_aux_set, CONCEPTOS_MAP, normalizar_csv_ventas_arca, consolidar_ventas_citi, generar_citi_ventas_lineas, generar_citi_alicuotas_lineas, crear_excel_ventas_citi, parsear_arca_retenciones_xls, transformar_retenciones_a_csv_arca, generar_zip_retenciones_arca, asignar_mes_por_xls_mendez, crear_excel_asiento_anual, cargar_base_apoc, guardar_base_apoc, descargar_base_apoc
 
-@st.cache_data(show_spinner=False)
-def obtener_razon_social_cuitonline(cuit):
-    clean_cuit = re.sub(r'[^0-9]', '', str(cuit)).strip()
-    url = f"https://www.cuitonline.com/detalle/{clean_cuit}/"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml",
-        "Accept-Language": "es-AR,es;q=0.9",
-    }
+def arca_credenciales():
+    """(cert, key, cuit_representada) desde st.secrets["arca"], o None si no está configurado."""
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            html = response.text
-            if "detailResults" not in html and "Actividades" not in html:
-                return None
-            
-            # Buscar en H1
-            h1_match = re.search(r'<h1[^>]*>([^<]+)</h1>', html, re.IGNORECASE)
-            if h1_match:
-                return h1_match.group(1).strip()
-            
-            # Fallback en Title
-            title_match = re.search(r'<title>([^(]+)\(', html)
-            if title_match:
-                return title_match.group(1).strip()
+        cfg = st.secrets["arca"]
+        return str(cfg["cert"]), str(cfg["key"]), str(cfg["cuit_representada"])
     except Exception:
-        pass
-    return None
+        return None
+
+
+@st.cache_data(show_spinner=False)
+def obtener_razon_social_arca(cuit):
+    """Razón social / nombre del CUIT según el padrón de ARCA (ws_sr_constancia_inscripcion).
+    Devuelve None si el CUIT no existe en ARCA. Los errores de conexión o autenticación
+    se propagan como ArcaError (y así no quedan cacheados)."""
+    from arca_padron import consultar_cuit, ArcaError
+    cred = arca_credenciales()
+    if not cred:
+        raise ArcaError("Falta configurar el certificado de ARCA en los Secrets.")
+    try:
+        datos = consultar_cuit(cuit, *cred)
+    except ValueError:
+        return None  # CUIT mal formado
+    except ArcaError as e:
+        if "no existe" in str(e).lower() or "inexistente" in str(e).lower():
+            return None
+        raise
+    return datos.get("nombre") or None
 
 
 # --- Page Config ---
@@ -5052,19 +5051,28 @@ elif herramienta == TOOL_CRUCE_DEDUCCIONES:
                                 if ck not in cuit_proveedor and r.get('razon_social'):
                                     cuit_proveedor[ck] = r['razon_social']
 
-                            # Buscar en CuitOnline los CUITs que no están en Mendez ni en el Padrón
+                            # Buscar en el padrón de ARCA los CUITs que no están en Mendez ni en el Padrón
                             cuits_faltantes = [ck for ck in arba_por_cuit.keys() if ck not in cuit_proveedor]
-                            if cuits_faltantes and organismo == "ARBA":
-                                prog_text = f"Buscando {len(cuits_faltantes)} proveedores en CuitOnline..."
+                            if cuits_faltantes and arca_credenciales():
+                                from arca_padron import ArcaError
+                                prog_text = f"Buscando {len(cuits_faltantes)} proveedores en ARCA..."
                                 progress_bar = st.progress(0, text=prog_text)
+                                error_arca = None
                                 for idx_cf, ck in enumerate(cuits_faltantes):
-                                    rz = obtener_razon_social_cuitonline(ck)
-                                    if rz:
-                                        cuit_proveedor[ck] = rz + " (CuitOnline)"
-                                    else:
-                                        cuit_proveedor[ck] = "⚠ SIN PROVEEDOR"
+                                    rz = None
+                                    if not error_arca:
+                                        try:
+                                            rz = obtener_razon_social_arca(ck)
+                                        except ArcaError as e:
+                                            error_arca = str(e)  # auth/conexión: no seguir consultando
+                                    cuit_proveedor[ck] = f"{rz} (ARCA)" if rz else "⚠ SIN PROVEEDOR"
                                     progress_bar.progress((idx_cf + 1) / len(cuits_faltantes), text=prog_text)
                                 progress_bar.empty()
+                                if error_arca:
+                                    st.warning(
+                                        f"No se pudieron buscar proveedores en ARCA: {error_arca} "
+                                        f"Los CUITs sin nombre quedaron como ⚠ SIN PROVEEDOR."
+                                    )
                             elif cuits_faltantes:
                                 for ck in cuits_faltantes:
                                     cuit_proveedor[ck] = "⚠ SIN PROVEEDOR"
@@ -6396,13 +6404,7 @@ elif herramienta == TOOL_CONSULTA_CUIT:
     # ───────────────────────────────────────────────────────────────────────────────
     from arca_padron import consultar_cuit, validar_cuit, formatear_cuit, ArcaError
 
-    try:
-        _arca_cfg = st.secrets["arca"]
-        arca_cert = str(_arca_cfg["cert"])
-        arca_key = str(_arca_cfg["key"])
-        arca_cuit_rep = str(_arca_cfg["cuit_representada"])
-    except Exception:
-        arca_cert = arca_key = arca_cuit_rep = None
+    arca_cert, arca_key, arca_cuit_rep = arca_credenciales() or (None, None, None)
 
     if not arca_cert:
         st.info(

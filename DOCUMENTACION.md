@@ -934,7 +934,7 @@ Cruza y concilia los comprobantes de retenciones/percepciones fiscales originado
 3. Filtra las deducciones de Mendez que corresponden al organismo usando keywords (`kw_mendez`) y exclusiones (`excl_mendez`) configuradas por organismo y tipo.
 4. Construye `mendez_detalle` (lista de comprobantes por CUIT con su monto deducido) y `arba_detalle_list` (lista de registros del organismo).
 5. Acumula montos por CUIT desde ambas fuentes → `mendez_por_cuit`, `arba_por_cuit`.
-6. Para ARBA: busca razones sociales faltantes en CuitOnline via `requests`.
+6. Busca las razones sociales faltantes (CUITs que no están en Mendez ni traen nombre en el padrón del organismo) en el **padrón de ARCA** con `obtener_razon_social_arca()` (usa `arca_padron.consultar_cuit`, ver herramienta 13; cacheado con `st.cache_data`). Aplica a **todos los organismos** (antes sólo ARBA, vía CuitOnline). Se marcan como `Nombre (ARCA)`; si el CUIT no existe en ARCA queda `⚠ SIN PROVEEDOR`. Si falla la autenticación o la conexión se corta la búsqueda y se muestra un `st.warning`. Sin certificado configurado en los Secrets, los faltantes quedan `⚠ SIN PROVEEDOR`.
 7. **Consolida registros divididos del organismo** (ver siguiente sección).
 8. **Aplica matching en dos fases por CUIT** (ver siguiente sección).
 9. **Computa Estado por registro** (✓ Ok / ⚠ Falta) en base al resultado del matching.
